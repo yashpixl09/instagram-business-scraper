@@ -1,0 +1,45 @@
+# ── Secrets. Never commit. ────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+service-account*.json
+
+# ── Browser session data ──────────────────────────────
+# Chrome profiles carry live cookies and auth tokens.
+chrome-profile/
+browser-data/
+*.cookies
+cookies.json
+
+# ── Generated lead data ───────────────────────────────
+# Commercial output, not source. Lives in Postgres.
+outputs/
+exports/
+*.xlsx
+*.csv
+
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# ── Local infra ───────────────────────────────────────
+pgdata/
+docker-compose.override.yml
+
+# ── Editors / OS ──────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
