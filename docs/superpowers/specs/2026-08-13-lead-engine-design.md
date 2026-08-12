@@ -142,6 +142,77 @@ row incorporating followers and engagement. Both rows persist; the latest by `sc
 is authoritative. A business whose Instagram enrichment fails keeps its Google-only score
 and is marked as such in the sheet, never left unscored.
 
+## Contacts and Decision-Makers
+
+A lead without a person to talk to is not actionable. Contact discovery is a first-class
+stage, not an afterthought, and a business may have several contacts at differing
+confidence.
+
+Sources, in descending reliability:
+
+| Source | Signal | Confidence |
+|---|---|---|
+| `review_reply` | Owner replies to Google reviews, frequently signed | 0.8 |
+| `website` | About or Contact page scraped by Firecrawl | 0.8 |
+| `ig_bio` | Owner name and email commonly present in Instagram bios | 0.6 |
+| `directory` | Justdial, IndiaMART listings carry a named contact person | 0.6 |
+| `search` | Firecrawl query for owner, founder, or proprietor | 0.4 |
+
+SearchAPI's `review_results` field is the cheapest source and arrives free with discovery —
+it is checked before any paid lookup is issued.
+
+Contacts are extracted under the same rule as every other fact: a validated schema or a
+failure. An extractor that cannot find a name records nothing. It never guesses one, since
+a fabricated owner name is worse than a blank field the moment the operator opens with it.
+
+Email is captured at both levels — `businesses.email` for a general inbox,
+`contacts.email` for a named person — because cold email is a target channel and a generic
+address supports a different message than a named one.
+
+## Automation Opportunities
+
+The second offer. Once a business qualifies, the system identifies which of its workflows
+are worth automating, so the pitch moves from "you need a website" to a specific,
+evidenced proposal.
+
+Detection is rule-based, not generative — the same discipline as scoring. Opportunities
+derive from observable gaps crossed with niche, and each fires only when its required
+signals are present in `enrichments`.
+
+A static catalog in `automations.py` mirrors the `NicheProfile` pattern already in the
+codebase:
+
+```python
+@dataclass(frozen=True)
+class AutomationOffer:
+    id: str
+    label: str
+    niches: tuple[str, ...]
+    required_signals: tuple[str, ...]
+    pitch_line: str
+    est_hours_saved_weekly: float
+```
+
+Representative entries:
+
+| Opportunity | Fires when | Applies to |
+|---|---|---|
+| Order intake | No website ordering, active social presence | cafe, bakery, cake shop, cloud kitchen |
+| Appointment booking + reminders | No booking link, appointment-driven niche | salon, spa, fitness/gym |
+| Review response | High review count, owner replies absent or sparse | all |
+| Lead capture | Runs Meta ads, no landing page | all |
+| Quotation handling | Enquiry-driven, no structured form | manufacturer, home decor |
+| Enrolment and batch scheduling | Class-based niche, manual enquiry flow | tutor/class |
+| Catalog and WhatsApp checkout | Instagram-only catalog, DM-based ordering | boutique, bakery, home decor |
+
+The LLM writes the pitch prose over detected opportunities; it does not decide which
+opportunities exist. `trigger_signals` and `evidence` record why each fired, so every claim
+in an automation pitch traces to a source row exactly as scoring claims do.
+
+Only businesses the operator has marked `high` or `medium` in `verdicts` receive automation
+pitch generation. This is the one place a tier gate applies, because the pitch is expensive
+to generate and worthless before the operator has judged the lead worth pursuing.
+
 ## Agent Runtime
 
 ### Loop levels
@@ -378,10 +449,37 @@ CREATE TABLE businesses (
   lat              double precision,
   lng              double precision,
   phone            text,
+  email            text,
   website          text,
   instagram_handle text,
+  facebook_url     text,
   first_seen_at    timestamptz NOT NULL DEFAULT now(),
   last_seen_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE contacts (
+  id          bigserial PRIMARY KEY,
+  business_id uuid NOT NULL REFERENCES businesses(id),
+  name        text,
+  role        text,                   -- owner|manager|marketing|unknown
+  phone       text,
+  email       text,
+  source      text NOT NULL,          -- review_reply|ig_bio|website|search|directory
+  source_url  text,
+  confidence  real NOT NULL DEFAULT 0.5,
+  found_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON contacts (business_id, confidence DESC);
+
+CREATE TABLE automation_opportunities (
+  id             bigserial PRIMARY KEY,
+  business_id    uuid NOT NULL REFERENCES businesses(id),
+  opportunity_id text NOT NULL,       -- key into the automations catalog
+  confidence     real NOT NULL,
+  trigger_signals jsonb NOT NULL,     -- which evidence fired this
+  evidence       jsonb NOT NULL,      -- enrichment_ids backing each signal
+  detected_at    timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (business_id, opportunity_id)
 );
 
 CREATE TABLE enrichments (
@@ -491,6 +589,34 @@ claims that cannot name a source row fail validation. This makes the existing
 
 `verdicts` has no agent write path. Operator judgments survive every run.
 
+`contacts` and `automation_opportunities` both carry `evidence` or `source_url`, extending
+traceability to the two fields most likely to embarrass the operator if fabricated: a
+person's name and a claim about how their business runs.
+
+## Outreach Generation
+
+Four channels, four artifacts. A walk-in and a cold email are not the same message, and a
+single body text reused across channels reads as a template in at least three of them.
+
+| Channel | Artifact | Shape |
+|---|---|---|
+| `visit` | Talking points, not a script | Three openers keyed to observed evidence, plus the strongest single number to lead with |
+| `call` | Opener plus objection handling | 20-second opener, two likely objections with responses |
+| `email` | Subject and body | Subject references a specific observation; body under 120 words |
+| `dm` | Single message | Under 60 words, no greeting block, one question |
+
+Every artifact is generated over validated rows and carries `evidence`. Generation is
+grounded on concrete observations — review count, peak hours, absent website, active ad
+spend — because a pitch that cites a real number is the entire advantage over a generic
+approach, and a pitch that cites a wrong number destroys the meeting.
+
+Two pitch kinds share this structure: `website_pitch` for the initial offer and
+`automation_pitch` for qualified leads, drawing on `automation_opportunities`.
+
+Generation falls back to deterministic templates when every LLM provider is unavailable.
+The templates are weaker but factually grounded, since they interpolate the same validated
+rows.
+
 ## Outputs
 
 One view builder, two writers.
@@ -501,11 +627,21 @@ businesses + enrichments + scores + verdicts
                      └─> Google Sheets (upsert)
 ```
 
-Sheet columns: identity and geography (`country`, `state`, `city`, `search_area`,
-`address`, `lat`, `lng`), contact (`phone`, `website`, `instagram_handle`, owner where
-found), evidence (`reviews`, `rating`, `followers`, `engagement_rate`, `runs_ads`,
-`peak_hours`), agent output (`total_score`, `audience_size`, `signals`, `ai_summary`,
-`pitch`), operator columns (`my_verdict`, `notes`, `contacted_on`, `channel`, `outcome`).
+Sheet columns:
+
+| Group | Columns |
+|---|---|
+| Identity | `business_name`, `niche`, `business_type` |
+| Geography | `country`, `state`, `city`, `search_area`, `address`, `lat`, `lng` |
+| Contact | `phone`, `email`, `website`, `instagram_handle`, `facebook_url` |
+| People | `contact_name`, `contact_role`, `contact_phone`, `contact_email`, `contact_source` |
+| Evidence | `reviews`, `rating`, `followers`, `engagement_rate`, `runs_ads`, `peak_hours` |
+| Agent output | `total_score`, `audience_size`, `signals`, `ai_summary`, `website_pitch` |
+| Automation | `automation_opportunities`, `automation_pitch` |
+| Operator | `my_verdict`, `notes`, `contacted_on`, `channel`, `outcome` |
+
+Every evidence column carries its source URL in a cell comment, so a number can be checked
+in one click before it is spoken aloud to a business owner.
 
 Sort by `search_area` — it groups a day of fieldwork into one neighborhood rather than a
 list scattered across a 40km city.
@@ -521,6 +657,36 @@ over agent output. Splitting editable from snapshot avoids the question of which
 a given note.
 
 Sheets API quotas and batch semantics require research before this phase.
+
+## Testing
+
+No test may contact a live external service. Every provider sits behind an interface with
+a fake implementation driven by recorded fixtures. A test suite that depends on SearchAPI
+being reachable fails on a train, and a test suite that depends on Instagram being
+reachable is a liability.
+
+| Layer | Approach |
+|---|---|
+| Scoring, banding, niche matching | Pure unit tests. The existing suite carries over |
+| Geographic resolution | Fixture-driven; asserts unresolvable input aborts rather than falls back |
+| Search cells | Asserts cursor advance, yield-measured exhaustion, and 30-day reset |
+| Providers | Recorded JSON fixtures. Malformed and empty payloads are cases, not accidents |
+| Queue | Integration tests against real Postgres: lease expiry, concurrent `SKIP LOCKED` claims, idempotency under duplicate enqueue |
+| Resume | Kill a run mid-flight, restart, assert completed steps are skipped and no work repeats |
+| LLM router | Fake providers returning 429 and 5xx; asserts circuit opens, chain advances, deterministic fallback terminates |
+| Extractors | Saved HTML fixtures. Asserts malformed input yields `status='error'`, never a fabricated value |
+| Browser worker | Fixture HTML only. Never live, in any test, under any flag |
+
+The negative cases carry the weight. The failure this system is most exposed to is not a
+crash but a plausible fabricated number reaching a sales conversation, so every extractor
+has an explicit test that bad input produces an error rather than a guess.
+
+Verification commands stay as they are today:
+
+```powershell
+python -m pytest -q
+python -m compileall -q lead_finder
+```
 
 ## Cost Model
 
@@ -542,14 +708,22 @@ remains as the crash-recovery mechanism, without backlog pressure.
 Schema is built complete from the start — migrations are expensive, tables are cheap.
 Workers land incrementally, each shipping usable output.
 
+0. Port from the prototype: `niches.py`, `scoring.py`, `dedupe.py`, `models.py` and their
+   tests. These are tested and correct; only the provider, storage, and API layers are
+   being replaced
 1. Postgres, migrations, FastAPI skeleton, task queue with leases
-2. Discovery via SearchAPI + geographic resolution + dedup at tool boundary
+2. Discovery via SearchAPI, geographic resolution, search cells, dedup at tool boundary
 3. Deterministic scoring + Excel export — **first usable sheet**
 4. Firecrawl enrichment: website verification, site grading, Ad Library
-5. LLM router with circuit breaker + pitch generation
-6. Chrome MCP Instagram worker, isolated sub-agent, rate-gated
-7. Full agent loop: events, compaction, memory, resume
-8. Google Sheets adapter with verdict sync
+5. Contact discovery: review replies, website About pages, directories
+6. LLM router with circuit breaker + per-channel outreach generation
+7. Chrome MCP Instagram worker, isolated sub-agent, rate-gated
+8. Automation opportunity detection + automation pitch
+9. Full agent loop: events, compaction, memory, resume
+10. Google Sheets adapter with verdict sync
+
+Phases 0–3 produce a sheet the operator can work from. Everything after deepens leads that
+are already actionable, so no phase leaves the system unusable.
 
 ## Deferred
 
@@ -559,7 +733,13 @@ is additive rather than a rewrite. Revisit once the single-agent pipeline runs i
 
 ## Open Questions
 
-- Audience band thresholds need field validation against real Bangalore results.
-- Niche set for the first runs is not yet fixed.
-- Owner and decision-maker discovery: Firecrawl search versus Perplexity Sonar
-  (~$0.01/lookup) is unresolved; decide after seeing Firecrawl's hit rate.
+- Audience band thresholds need field validation against real Bangalore results. The
+  numbers in this spec are a starting point, not a finding.
+- Niche set and area list for the first runs are not yet fixed.
+- Perplexity Sonar (~$0.01/lookup) as a contact-discovery fallback is deferred until the
+  free sources — review replies, website About pages, directories — have a measured hit
+  rate. Paying for a lookup that the free path already resolves is the wrong default.
+- Google Sheets API quotas and batch semantics require research before phase 10.
+- `est_hours_saved_weekly` in the automations catalog is currently an estimate per
+  opportunity type. It should become niche-specific once real conversations produce
+  evidence.
