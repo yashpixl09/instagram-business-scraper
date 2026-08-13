@@ -429,8 +429,29 @@ class SearchBudget:
         with self._connect() as conn:
             conn.execute(_ALLOCATE.format(values=values), params)
             rows = conn.execute(_READ_ALLOWANCE, (provider, key)).fetchall()
+            allowance = {str(row[0]): int(row[1]) for row in rows}
+
+            # Verify the readback rather than trusting the arithmetic above. `_divide` cannot
+            # over-allocate, but `_ALLOCATE` is ON CONFLICT DO NOTHING, so a row that already
+            # existed keeps its own ceiling and is not replaced by this split's share.
+            #
+            # That is not hypothetical: migration 0011 widens the key by giving the old
+            # single-row ledger `purpose='discover'` and `key_fingerprint=''`, preserving its
+            # limit. Splitting 100 as 70/30 afterwards leaves discover at its inherited 100
+            # and inserts refresh at 30 -- 130 billable searches on a 100-search key, every
+            # per-row CHECK satisfied, no error anywhere, and the overspend only visible when
+            # SearchAPI starts refusing at a number the operator cannot explain.
+            granted = sum(allowance.values())
+            if granted > total:
+                conn.rollback()
+                raise AllowanceAlreadySplit(
+                    f"{provider}/{key or 'no key'} already holds ceilings summing to "
+                    f"{granted}, which exceeds the {total} being allocated: "
+                    f"{allowance}. An existing row was not overwritten. Reconcile it with "
+                    f"set_limit() before splitting, or allocate under a fresh key."
+                )
             conn.commit()
-        return {str(row[0]): int(row[1]) for row in rows}
+        return allowance
 
     def ensure(
         self,

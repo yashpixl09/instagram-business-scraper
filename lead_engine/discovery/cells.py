@@ -492,11 +492,13 @@ def revive(cell: SearchCell) -> SearchCell:
     return replace(cell, status=PENDING, next_page=1, new_yield=0, exhausted_at=None)
 
 
-def order_cells(
-    cells: Iterable[SearchCell],
-    priority: dict[str, int] | None = None,
-) -> list[SearchCell]:
-    """Selection order: priority first, then measured yield, then status, then id.
+def selection_key(cell: SearchCell, priority: dict[str, int] | None = None) -> tuple[Any, ...]:
+    """Where this cell sits in the queue for the next credit. Lower sorts first.
+
+    Priority first, then measured yield, then status, then id -- and the last two fields are
+    there for determinism rather than for judgement. Two runs of one request must spend their
+    credits on the same ground in the same order, or a budget that ran out half way through
+    would have bought different neighbourhoods each time for no reason anyone could name.
 
     `priority` is keyed by niche id and comes from `NicheProfile.scan_multiplier`. It orders
     cells; it never creates them. Under the breadth-first policy the number of billed
@@ -504,19 +506,27 @@ def order_cells(
     would turn a 1-credit niche into a 3-credit one -- which is precisely the bug this
     argument exists to avoid. What it does instead is decide who gets the credits first when
     there are not enough to go round.
+
+    Exposed rather than closed over inside `order_cells` because `service._plan` sorts the
+    work items it builds from these cells, and a second copy of this tuple over there would
+    be a second definition of which ground gets the scarce credits first.
     """
     priority = priority or {}
+    return (
+        -int(priority.get(cell.niche_id, 1)),
+        -cell.new_yield,
+        _STATUS_RANK.get(cell.status, len(_STATUS_RANK)),
+        cell.id if cell.id is not None else 0,
+        cell.spec.query_variant,
+    )
 
-    def key(cell: SearchCell) -> tuple[Any, ...]:
-        return (
-            -int(priority.get(cell.niche_id, 1)),
-            -cell.new_yield,
-            _STATUS_RANK.get(cell.status, len(_STATUS_RANK)),
-            cell.id if cell.id is not None else 0,
-            cell.spec.query_variant,
-        )
 
-    return sorted(cells, key=key)
+def order_cells(
+    cells: Iterable[SearchCell],
+    priority: dict[str, int] | None = None,
+) -> list[SearchCell]:
+    """Selection order: highest priority, then highest measured yield, first."""
+    return sorted(cells, key=lambda cell: selection_key(cell, priority))
 
 
 # --- SQL -------------------------------------------------------------------------------

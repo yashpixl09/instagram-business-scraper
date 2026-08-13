@@ -18,25 +18,32 @@ candidates to have qualified something and qualified nothing is declared STARVED
     starved      0 qualified out of >= 20 candidates. The type slugs are wrong. This is a
                  bug report, addressed to whoever maintains the registry.
 
-WHY THE REJECTIONS ARE SPLIT THREE WAYS
----------------------------------------
-`rejected_types` is the correction data -- the only correction data this system will ever
-get -- so a rejection is worthless unless it says which registry edit would fix it. Three
-reasons, three opposite edits:
+WHAT THIS MODULE DOES NOT DO ANY MORE
+-------------------------------------
+It does not classify. Deciding whether one place qualifies, and which of its type slugs to
+blame when it does not, belongs to `providers.searchapi.build_outcome` -- which does it once,
+immediately after parsing, for the live client and the fixture provider alike. This module
+used to re-walk the same rules against the same profile to produce the same verdict, and two
+implementations of one rule is not redundancy: it is a pair that agrees until the day either
+side is edited, and then disagrees silently about which niches are broken. What arrives here
+now is a finished `SearchOutcome`, and all that happens to it is accumulation.
 
-    missing_type      the place carried types, none of them qualifying. The recorded slugs
-                      are candidates for `include_types`. This is the common starvation
-                      shape: a real cake shop typed `dessert_shop` that the profile forgot.
-    excluded_type     the place carried a DISQUALIFYING type. The recorded slug is in
-                      `exclude_types` (or caught by an exclude suffix) and may be too broad.
-                      The opposite edit: loosen an exclusion rather than add an inclusion.
-    no_name_evidence  the type gate passed and the strict name gate did not. Points at
-                      `qualification_terms`, and at nothing else.
+TWO BUCKETS, BECAUSE THE REPAIRS ARE OPPOSITE
+---------------------------------------------
+`rejected_types` is the correction data -- the only correction data this system will ever get
+-- and it is worthless unless it says which registry edit would fix the niche:
 
-Merging those into one bucket would produce a list of slugs with no indication of whether
-to add them, remove them, or leave them alone -- which is data that looks actionable and is
-not. They are kept apart in the stored counts by prefixing the key with the reason, so the
-whole thing stays one flat jsonb object that Postgres can merge additively across runs.
+    a slug count      a place carried types and none of them qualified for this profile. The
+                      recorded slugs are candidates for `include_types` (or evidence that an
+                      exclusion is too broad). The common starvation shape: a real cake shop
+                      typed `dessert_shop` that the profile forgot.
+    the name gate     the type gate PASSED and the strict name gate did not. No slug is at
+                      fault; the fix is a `qualification_terms` edit and nothing else.
+
+A niche starving on the name gate and a niche starving on its taxonomy look identical in a
+single "rejected" number and need opposite repairs, so the two are stored apart -- the slug
+counts under their own slugs, the name-gate total under one reserved key that no slug can
+collide with. Merging them would produce a list that looks actionable and is not.
 
 ACCUMULATION IS THE POINT
 -------------------------
@@ -50,20 +57,12 @@ in one.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from lead_engine.models import Lead
-from lead_engine.niches import (
-    DISQUALIFIES,
-    QUALIFIES,
-    NicheProfile,
-    classify_type,
-    has_name_evidence,
-    slugify_type,
-)
+from lead_engine.providers.searchapi import SearchOutcome
 
 from .cells import ConnectionFactory
 
@@ -80,110 +79,23 @@ STATES: tuple[str, ...] = (UNVERIFIED, VERIFIED, STARVED)
 #: page: a whole response in which nothing matched.
 STARVATION_THRESHOLD = 20
 
-# --- rejection reasons -----------------------------------------------------------------
-
-MISSING_TYPE = "missing_type"
-EXCLUDED_TYPE = "excluded_type"
-NO_NAME_EVIDENCE = "no_name_evidence"
-
-REASONS: tuple[str, ...] = (MISSING_TYPE, EXCLUDED_TYPE, NO_NAME_EVIDENCE)
-
-#: What is recorded when Google returned a place with no type at all. A real and separate
-#: signal from "typed, but wrongly": it says the *response parsing* lost the types, not that
-#: the registry is missing a slug.
-UNTYPED = "_untyped"
-
-#: Separates reason from slug in a stored key. A colon cannot appear in a slug --
-#: `slugify_type` emits only `[a-z0-9_]` -- so the key parses back apart unambiguously.
-KEY_SEPARATOR = ":"
+#: The reserved key inside `rejected_types` that holds the name-gate total. It is not a type
+#: slug and cannot be mistaken for one: `slugify_type` emits `[a-z0-9_]` and strips leading
+#: underscores, so no Google display label can ever produce a key beginning with `_`.
+#:
+#: A column of its own would have been the other option, and it was not taken: this number is
+#: only ever read beside the slug counts it is being distinguished from, and a migration for
+#: one integer buys nothing that a reserved key and two accessors do not.
+NAME_GATE_KEY = "_name_gate"
 
 
-def rejection_key(reason: str, slug: str) -> str:
-    if reason not in REASONS:
-        raise ValueError(f"reason must be one of {REASONS!r}, got {reason!r}")
-    return f"{reason}{KEY_SEPARATOR}{slug}"
+def split_buckets(counts: Mapping[str, int]) -> tuple[dict[str, int], int]:
+    """Stored counts, split back into (type slugs, name-gate total)."""
+    slugs = {key: int(value) for key, value in counts.items() if not key.startswith("_")}
+    return slugs, int(counts.get(NAME_GATE_KEY, 0) or 0)
 
 
-def split_rejection_key(key: str) -> tuple[str, str]:
-    """`"missing_type:dessert_shop"` -> `("missing_type", "dessert_shop")`."""
-    reason, _, slug = str(key).partition(KEY_SEPARATOR)
-    return reason, slug
-
-
-def group_rejected_types(counts: dict[str, int]) -> dict[str, dict[str, int]]:
-    """Stored flat counts, regrouped by reason for a human to read."""
-    grouped: dict[str, dict[str, int]] = {reason: {} for reason in REASONS}
-    for key, count in counts.items():
-        reason, slug = split_rejection_key(key)
-        bucket = grouped.setdefault(reason, {})
-        bucket[slug] = bucket.get(slug, 0) + int(count)
-    return {reason: slugs for reason, slugs in grouped.items() if slugs}
-
-
-# --- qualification, with its reason ------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Rejection:
-    """Why one place did not qualify, and which slugs to blame."""
-
-    reason: str
-    slugs: tuple[str, ...]
-
-    def keys(self) -> tuple[str, ...]:
-        return tuple(rejection_key(self.reason, slug) for slug in self.slugs)
-
-
-def slugs_for(lead: Lead) -> tuple[str, ...]:
-    """The Google type slugs `matches_niche` will judge, in its own order.
-
-    Deliberately reproduces the slug extraction in `niches.matches_niche` rather than
-    calling into it, because that function returns a bool and this needs the slugs. If the
-    two ever disagree the tally would blame the wrong slug -- so `tests/test_discovery.py`
-    pins them against each other over the whole registry instead of trusting the comment.
-    """
-    slugs = [slugify_type(lead.category), *(slugify_type(value) for value in lead.raw_categories)]
-    return tuple(dict.fromkeys(slug for slug in slugs if slug))
-
-
-def classify(profile: NicheProfile, lead: Lead) -> Rejection | None:
-    """None if the lead qualifies, otherwise why it did not.
-
-    The verdict itself is `niches.matches_niche`'s to make and this must not second-guess
-    it; what happens here is that the same rules are re-walked to attribute the failure.
-    The precedence is `matches_niche`'s, unchanged: one disqualifying type is fatal before
-    either gate, then the type gate, then the strict name gate.
-    """
-    slugs = slugs_for(lead)
-    if not slugs:
-        # No type evidence at all. `allow_name_only` profiles can still qualify such a
-        # place on its name, so this is only a rejection if the name gate also fails.
-        if profile.allow_name_only and profile.strict and has_name_evidence(profile, lead):
-            return None
-        return Rejection(MISSING_TYPE, (UNTYPED,))
-
-    verdicts = {slug: classify_type(profile, slug) for slug in slugs}
-
-    excluded = tuple(slug for slug, verdict in verdicts.items() if verdict == DISQUALIFIES)
-    if excluded:
-        return Rejection(EXCLUDED_TYPE, excluded)
-
-    qualifying = tuple(slug for slug, verdict in verdicts.items() if verdict == QUALIFIES)
-    if not qualifying:
-        # `allow_name_only` is the one way past a failed type gate, and only for a strict
-        # profile -- exactly as `matches_niche` reads it.
-        if profile.strict and profile.allow_name_only and has_name_evidence(profile, lead):
-            return None
-        # Nothing disqualified and nothing qualified, so every slug here is NEUTRAL: the
-        # precise list of candidates for this profile's `include_types`.
-        return Rejection(MISSING_TYPE, slugs)
-
-    if profile.strict and not has_name_evidence(profile, lead):
-        # The type gate passed. Only the name gate refused, so the slug is not at fault and
-        # recording it under `missing_type` would send the maintainer to the wrong field.
-        return Rejection(NO_NAME_EVIDENCE, qualifying)
-
-    return None
+# --- what one pass learned ----------------------------------------------------------------
 
 
 @dataclass
@@ -193,19 +105,36 @@ class NicheObservation:
     niche_id: str
     qualified: int = 0
     rejected: int = 0
+    #: Google type slug -> times it appeared on a place this niche refused. Never contains
+    #: the name-gate count; that is `name_gate_rejected`.
     rejected_types: dict[str, int] = field(default_factory=dict)
+    #: Places whose types qualified and whose name did not, for a `strict` profile.
+    name_gate_rejected: int = 0
+
+    @classmethod
+    def from_outcome(cls, outcome: SearchOutcome, *, dropped: int = 0) -> NicheObservation:
+        """Project one finished search onto the niche's running tally.
+
+        `dropped` is how many of `outcome.leads` the caller discarded before counting -- in
+        practice the `"Unnamed business"` sentinel, which is a placeholder rather than a
+        business and must not be counted as a qualified one. It comes out of `qualified`
+        only. `rejected` is `returned - qualified`, which is unchanged by the removal, and a
+        NAMELESS place that the provider already rejected is not visible from here at all:
+        its slugs are in `rejected_types` and they stay there, since what its types were is
+        evidence about the registry whether or not Google could read its sign.
+        """
+        dropped = max(0, int(dropped))
+        return cls(
+            niche_id=outcome.niche_id,
+            qualified=max(0, int(outcome.qualified) - dropped),
+            rejected=max(0, int(outcome.returned) - int(outcome.qualified)),
+            rejected_types={str(k): int(v) for k, v in outcome.rejected_types.items()},
+            name_gate_rejected=max(0, int(outcome.name_gate_rejected)),
+        )
 
     @property
     def candidates(self) -> int:
         return self.qualified + self.rejected
-
-    def count_qualified(self, n: int = 1) -> None:
-        self.qualified += n
-
-    def count_rejection(self, rejection: Rejection) -> None:
-        self.rejected += 1
-        for key in rejection.keys():
-            self.rejected_types[key] = self.rejected_types.get(key, 0) + 1
 
     def merge(self, other: NicheObservation) -> NicheObservation:
         if other.niche_id != self.niche_id:
@@ -218,30 +147,25 @@ class NicheObservation:
             qualified=self.qualified + other.qualified,
             rejected=self.rejected + other.rejected,
             rejected_types=merged,
+            name_gate_rejected=self.name_gate_rejected + other.name_gate_rejected,
         )
 
-
-def observe(profile: NicheProfile, leads: Iterable[Lead]) -> tuple[list[Lead], NicheObservation]:
-    """Split candidates into the ones that qualify and a tally of why the rest did not."""
-    observation = NicheObservation(profile.id)
-    qualified: list[Lead] = []
-    for lead in leads:
-        rejection = classify(profile, lead)
-        if rejection is None:
-            qualified.append(lead)
-            observation.count_qualified()
-        else:
-            observation.count_rejection(rejection)
-    return qualified, observation
+    def stored_counts(self) -> dict[str, int]:
+        """Both buckets as the one flat jsonb object the table holds."""
+        counts = {key: int(value) for key, value in self.rejected_types.items()}
+        if self.name_gate_rejected:
+            counts[NAME_GATE_KEY] = int(self.name_gate_rejected)
+        return counts
 
 
 def derive_state(qualified: int, rejected: int) -> str:
     """The state these accumulated totals imply.
 
-    The pure mirror of the CASE expression in the SQL below. Both exist because the stored
-    state has to be computed from post-merge totals inside the upsert, while callers and
-    tests need to reason about the rule without a database. They are pinned against each
-    other in `tests/test_discovery.py`, which is the only thing that stops them drifting.
+    The pure mirror of the CASE expression in the SQL below, and of `niche_state()` in
+    migration 0012. All three exist because the stored state has to be computed from
+    post-merge totals inside the upsert, while callers and tests need to reason about the
+    rule without a database. They are pinned against each other in `tests/test_discovery.py`,
+    which is the only thing that stops them drifting.
     """
     if qualified > 0:
         return VERIFIED
@@ -258,8 +182,10 @@ class NicheStatus:
     state: str
     qualified: int
     rejected: int
+    #: Type slugs only. The name-gate total is stored in the same jsonb and read out here.
     rejected_types: dict[str, int]
     last_seen_at: datetime | None
+    name_gate_rejected: int = 0
 
     @property
     def candidates(self) -> int:
@@ -269,8 +195,10 @@ class NicheStatus:
     def starved(self) -> bool:
         return self.state == STARVED
 
-    def by_reason(self) -> dict[str, dict[str, int]]:
-        return group_rejected_types(self.rejected_types)
+    @property
+    def worst_types(self) -> list[tuple[str, int]]:
+        """The slugs to read first: biggest offender first, ties broken alphabetically."""
+        return sorted(self.rejected_types.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 # --- SQL -------------------------------------------------------------------------------
@@ -326,13 +254,15 @@ def _row(values: Sequence[Any]) -> NicheStatus:
     # psycopg parses jsonb for us; a stub connection may hand back the string it was given.
     if isinstance(rejected_types, str):
         rejected_types = json.loads(rejected_types)
+    slugs, name_gate = split_buckets(rejected_types or {})
     return NicheStatus(
         niche_id=niche_id,
         state=state,
         qualified=int(qualified),
         rejected=int(rejected),
-        rejected_types={key: int(value) for key, value in (rejected_types or {}).items()},
+        rejected_types=slugs,
         last_seen_at=last_seen_at,
+        name_gate_rejected=name_gate,
     )
 
 
@@ -349,7 +279,7 @@ class NicheStatusStore:
         what distinguishes "this niche has never been searched" from "this niche has been
         searched and returned nothing", and those call for opposite investigations.
         """
-        payload = json.dumps({key: int(value) for key, value in observation.rejected_types.items()})
+        payload = json.dumps(observation.stored_counts())
         with self._connect() as conn:
             row = conn.execute(
                 _UPSERT,

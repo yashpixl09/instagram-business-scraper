@@ -101,6 +101,7 @@ from lead_engine.niches import (
     matches_niche,
     slugify_type,
 )
+from lead_engine.providers.budget import fingerprint
 from lead_engine.providers.errors import ProviderError, bad_response, from_status, unavailable
 
 PROVIDER = "searchapi"
@@ -140,12 +141,19 @@ ENVELOPE_KEYS = ("search_metadata", "search_parameters", "search_information")
 class Budget(Protocol):
     """The sliver of `providers.budget.SearchBudget` this module uses.
 
-    Deliberately narrow. The real `spend()` also takes keyword-only `purpose` and
-    `key_fingerprint`; this client passes neither, so that widening the ledger's key -- which
-    is happening in `budget.py` right now -- cannot require a change here.
+    `key_fingerprint` is not optional here, and an earlier version of this file was wrong to
+    treat it as an implementation detail of the ledger. SearchAPI credits belong to a *key*,
+    not to an account: rotating in a fresh key opens a fresh allowance, and the ledger keys
+    its rows on `(provider, purpose, key_fingerprint)` so that happens without a manual reset
+    anyone could forget.
+
+    A client that omitted the fingerprint charged the `""` row -- a row nobody seeds -- so
+    against a correctly seeded ledger every single search raised `BudgetNotConfigured` before
+    it was issued, and against an incorrectly seeded one it drew down an allowance belonging
+    to no key at all. The client knows which key it holds; it is the only thing that does.
     """
 
-    def spend(self, provider: str, n: int = 1) -> int: ...
+    def spend(self, provider: str, n: int = 1, *, key_fingerprint: str = "") -> int: ...
 
 
 @dataclass(frozen=True)
@@ -400,6 +408,9 @@ class SearchApiClient:
         auth_in_query: bool = True,
     ) -> None:
         self.api_key = api_key
+        # Which allowance this client draws down. Derived once, from the key it holds, so a
+        # rotated key charges a different row without anything else in the system changing.
+        self.key_fingerprint = fingerprint(api_key) if api_key else ""
         self.budget = budget
         self.endpoint = endpoint
         self.hl = hl
@@ -478,7 +489,10 @@ class SearchApiClient:
         # budget.py, "SPEND FIRST, NEVER REFUND". A timeout does not prove the query was not
         # billed; the response is what got lost, not necessarily the request.
         if self.budget is not None:
-            self.budget.spend(PROVIDER, 1)
+            # Charged against THIS key's allowance. The ledger keys on the fingerprint so a
+            # rotated key starts fresh and the spent one keeps its history; omitting it here
+            # would charge a `""` row that nothing seeds.
+            self.budget.spend(PROVIDER, 1, key_fingerprint=self.key_fingerprint)
 
         try:
             response = self._client.get(self.endpoint, params=params)
