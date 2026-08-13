@@ -536,37 +536,54 @@ class InstagramUrlTests(unittest.TestCase):
             "https://www.instagram.com/blush.salon/",
         )
 
-    def test_a_full_url_is_returned_unchanged(self):
+    def test_every_spelling_of_a_profile_link_lands_on_one_canonical_url(self):
+        # Normalised, not returned verbatim. These are receipts on a cell the operator will
+        # click while deciding whether to trust a number, so they should all reach the same
+        # page regardless of how the handle happened to be stored.
         for stored in (
-            "https://www.instagram.com/blush.salon/",
+            "@blush.salon",
+            "blush.salon",
+            "www.instagram.com/blush.salon",
+            "instagram.com/blush.salon",
+            "https://instagram.com/blush.salon/",
+            "https://www.instagram.com/blush.salon",
             "http://instagram.com/blush.salon",
         ):
             with self.subTest(stored=stored):
-                self.assertEqual(instagram_profile_url(stored), stored)
+                self.assertEqual(
+                    instagram_profile_url(stored),
+                    "https://www.instagram.com/blush.salon/",
+                )
+
+    def test_a_scheme_less_profile_link_is_not_double_prefixed(self):
+        # The regression this class exists for. The host check once missed the `www.` form,
+        # so the link became https://www.instagram.com/www.instagram.com/blush.salon/ -- a
+        # plausible URL that 404s, attached to the followers cell as its source. view.py's
+        # own docstring calls that worse than no comment: the operator clicks, cannot find
+        # the number, and stops trusting the other receipts too.
+        self.assertEqual(
+            instagram_profile_url("www.instagram.com/blush.salon"),
+            "https://www.instagram.com/blush.salon/",
+        )
+
+    def test_another_sites_url_is_left_alone(self):
+        # A Linktree in the handle column is not an Instagram profile, and rewriting it into
+        # one would fabricate a source for a number it never provided.
+        self.assertEqual(
+            instagram_profile_url("https://linktr.ee/blush"), "https://linktr.ee/blush"
+        )
 
     def test_nothing_in_means_nothing_out(self):
         for empty in (None, "", "   ", "@", "@/"):
             with self.subTest(handle=empty):
                 self.assertIsNone(instagram_profile_url(empty))
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG (reported, not fixed): a scheme-less profile link stored in the handle "
-            "column is double-prefixed. The guard checks startswith('instagram.com') and "
-            "so misses the 'www.' form, producing "
-            "https://www.instagram.com/www.instagram.com/blush.salon/ -- a plausible URL "
-            "that 404s. That URL becomes the comment on the followers and engagement_rate "
-            "cells, which is exactly the failure view.py's own docstring calls worse than "
-            "no comment: the operator clicks it, cannot find the number, and stops "
-            "trusting the others."
-        ),
-    )
-    def test_a_scheme_less_profile_link_is_not_double_prefixed(self):
-        self.assertEqual(
-            instagram_profile_url("www.instagram.com/blush.salon"),
-            "https://www.instagram.com/blush.salon/",
-        )
+    def test_a_bare_host_is_not_a_profile(self):
+        # instagram.com with no path links to nothing in particular, so it is no evidence
+        # for the cell it would be attached to.
+        for bare in ("instagram.com", "www.instagram.com", "https://www.instagram.com/"):
+            with self.subTest(handle=bare):
+                self.assertIsNone(instagram_profile_url(bare))
 
 
 class EvidenceSourceTests(unittest.TestCase):

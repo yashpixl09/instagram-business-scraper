@@ -136,8 +136,17 @@ class FakeConnection:
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> FakeCursor:
         statement = " ".join(sql.split())
         self.statements.append((statement, tuple(params)))
-        if statement.upper().startswith("SELECT"):
+        verb = statement.split()[0].upper()
+        if verb == "SELECT":
             return FakeCursor(self.rows.get(params[0]))
+        # Writes actually take effect. A fake that only recorded them would let a test
+        # "prove" a cached row was evicted while the next read still returned it -- which is
+        # the precise bug this fake is used to check for.
+        if verb == "DELETE":
+            self.rows.pop(params[0], None)
+        elif verb == "INSERT":
+            query, formatted, lat, lng, country_code, *_ = params
+            self.rows[query] = (formatted, lat, lng, country_code)
         return FakeCursor()
 
     def commit(self) -> None:
@@ -659,6 +668,73 @@ class CachingResolverTests(unittest.TestCase):
 
 
 # --- fan-out ------------------------------------------------------------------------------
+
+
+class CachePoisoningTests(unittest.TestCase):
+    """A cache may only be authoritative about answers that were accepted.
+
+    `CachingResolver` writes on the way out, and the country check necessarily runs after --
+    it needs the scope, which the resolver does not have. So a wrong-country answer is stored
+    and then rejected, and without eviction the rejection becomes permanent: every later run
+    is served the same wrong point, aborts identically, and never asks the geocoder again.
+    The operator sees a failure that retrying cannot clear and nothing explains.
+    """
+
+    QUERY = "Jaipur, Rajasthan, India"
+
+    def wrong_country_resolver(self):
+        class TexasResolver:
+            name = "texas"
+
+            def resolve(self, query: str, precision: str = "area"):
+                # There is a Jaipur in Rajasthan and another in Texas.
+                return ResolvedLocation(
+                    label="Jaipur, Texas, United States",
+                    latitude=29.7,
+                    longitude=-95.4,
+                    radius_meters=3000,
+                    precision=precision,
+                    gl="us",
+                    source_query=query,
+                )
+
+        return TexasResolver()
+
+    def test_a_rejected_resolution_is_evicted_so_the_next_run_can_differ(self):
+        connection = FakeConnection()
+        resolver = geo.CachingResolver(self.wrong_country_resolver(), connection)
+        scope = GeoScope(city="Jaipur", state="Rajasthan", country="India")
+
+        with self.assertRaises(ProviderError) as caught:
+            geo.resolve_scope(scope, resolver)
+        self.assertEqual(caught.exception.code, "location_not_found")
+
+        self.assertEqual(
+            connection.rows,
+            {},
+            "the wrong-country point is still cached, so every later run fails identically "
+            "without ever re-asking the geocoder",
+        )
+        self.assertIn("DELETE", connection.verbs())
+
+    def test_an_accepted_resolution_stays_cached(self):
+        # The counterweight: if eviction were unconditional the cache would never hold
+        # anything and every area would be geocoded on every run.
+        connection = FakeConnection()
+        resolver = geo.CachingResolver(geo.SeedResolver(), connection)
+        scope = GeoScope(city="Bangalore", state="Karnataka", country="India")
+
+        geo.resolve_scope(scope, resolver)
+
+        self.assertTrue(connection.rows, "an accepted resolution should have been cached")
+        self.assertNotIn("DELETE", connection.verbs())
+
+    def test_a_resolver_without_invalidate_still_works(self):
+        # `invalidate` is optional, so a plain uncached resolver must not break -- there is
+        # nothing to evict when nothing was stored.
+        scope = GeoScope(city="Jaipur", state="Rajasthan", country="India")
+        with self.assertRaises(ProviderError):
+            geo.resolve_scope(scope, self.wrong_country_resolver())
 
 
 class FanOutTests(unittest.TestCase):

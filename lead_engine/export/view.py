@@ -214,15 +214,32 @@ def instagram_profile_url(handle: str | None) -> str | None:
     """`@blush.salon` -> `https://www.instagram.com/blush.salon/`.
 
     Not a guess: this is exactly the page a follower count was read from, which is what
-    makes it a legitimate source for that cell. A value that is already a URL is returned
-    unchanged, since some callers store the profile link in the handle column.
+    makes it a legitimate source for that cell. A value that is already a URL is normalised
+    rather than rebuilt, since some callers store the profile link in the handle column.
+
+    The host check has to cover the `www.` form. It once did not, so a scheme-less
+    `www.instagram.com/blush.salon` was treated as a bare handle and became
+    `https://www.instagram.com/www.instagram.com/blush.salon/`. That value goes into the cell
+    comment on `followers`, so the operator right-clicks a number for its receipt and lands
+    on a 404 -- which this module's own docstring calls worse than no comment at all, because
+    they stop trusting the other receipts too.
     """
     if not handle:
         return None
     cleaned = handle.strip().lstrip("@").strip("/")
     if not cleaned:
         return None
-    if "://" in cleaned or cleaned.lower().startswith("instagram.com"):
+
+    # Strip any scheme and leading host before deciding, so every spelling of "this is
+    # already an Instagram link" takes the same path: with scheme or without, www. or not.
+    without_scheme = cleaned.split("://", 1)[-1]
+    host, _, path = without_scheme.partition("/")
+    if host.lower() in ("instagram.com", "www.instagram.com"):
+        profile = path.strip("/")
+        # A host with no path is not a profile; there is nothing to link the number to.
+        return f"https://www.instagram.com/{profile}/" if profile else None
+    if "://" in cleaned:
+        # Some other site's URL. Not ours to rewrite into an Instagram link.
         return handle.strip()
     return f"https://www.instagram.com/{cleaned}/"
 

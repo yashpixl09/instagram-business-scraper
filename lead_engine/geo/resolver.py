@@ -300,6 +300,8 @@ class NominatimResolver:
 
 SELECT_SQL = "SELECT formatted, lat, lng, country_code FROM geo_cache WHERE query = %s"
 
+DELETE_SQL = "DELETE FROM geo_cache WHERE query = %s"
+
 UPSERT_SQL = """
 INSERT INTO geo_cache (query, formatted, lat, lng, country_code, resolver)
 VALUES (%s, %s, %s, %s, %s, %s)
@@ -371,6 +373,22 @@ class CachingResolver:
         )
         return location
 
+    def invalidate(self, query: str) -> None:
+        """Forget a cached answer, so the next run asks the geocoder again.
+
+        A caching resolver caches whatever its inner resolver returned, including an answer a
+        later check rejects -- and the country check is necessarily later, because this class
+        knows the query but not the scope it came from.
+
+        Without this, one wrong answer is permanent. "Jaipur, Rajasthan, India" resolving to
+        Jaipur, Texas aborts the run correctly the first time, and then every run afterwards
+        is served the Texas point from cache, aborts identically, and never re-asks. The
+        operator sees a failure that cannot be retried away and has no visible cause.
+
+        A cache is only allowed to be authoritative about answers that were accepted.
+        """
+        self._connection.execute(DELETE_SQL, (query,))
+
 
 # --- chain --------------------------------------------------------------------------------
 
@@ -417,7 +435,17 @@ def resolve_scope(scope: GeoScope, resolver: Resolver) -> tuple[ResolvedLocation
     resolved: list[ResolvedLocation] = []
     for query, precision in scope.targets():
         location = resolver.resolve(query, precision)
-        _verify_country(scope, location, query)
+        try:
+            _verify_country(scope, location, query)
+        except ProviderError:
+            # Evict before re-raising. The resolver cached this answer on the way out, and a
+            # rejected answer left in the cache makes the rejection permanent: every later
+            # run is served the same wrong point and fails identically without ever asking
+            # the geocoder again. `invalidate` is optional so a plain resolver still works.
+            invalidate = getattr(resolver, "invalidate", None)
+            if invalidate is not None:
+                invalidate(query)
+            raise
         resolved.append(location)
     return tuple(resolved)
 

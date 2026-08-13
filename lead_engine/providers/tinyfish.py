@@ -39,6 +39,7 @@ therefore not leak -- it would silently vanish, and the run log would say nothin
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -125,6 +126,9 @@ class TokenBucket:
         self._sleep = sleep
         self._tokens = float(capacity)
         self._updated = clock()
+        # One bucket, eight enrichment threads. Guards the balance and the watermark
+        # together: refilling against a stale watermark hands out tokens time never earned.
+        self._lock = threading.Lock()
 
     @property
     def rate(self) -> float:
@@ -133,8 +137,9 @@ class TokenBucket:
 
     @property
     def available(self) -> float:
-        self._refill()
-        return self._tokens
+        with self._lock:
+            self._refill()
+            return self._tokens
 
     def _refill(self) -> None:
         now = self._clock()
@@ -148,24 +153,42 @@ class TokenBucket:
     def take(self, tokens: int = 1) -> float:
         """Consume `tokens`, sleeping first if the bucket is short. Returns seconds slept.
 
-        There is no retry loop. The wait is computed exactly -- a deficit of `d` tokens
-        takes `d / rate` seconds -- so one sleep is always enough, and a `sleep` that does
-        not really advance time cannot spin this method forever.
+        THREAD SAFE, and it has to be: `worker-enrich` runs at concurrency 8 against one
+        client, so eight threads share one bucket.
+
+        The debt model is what makes that work. Tokens are deducted under the lock
+        *unconditionally*, letting the balance go negative, and each caller then sleeps off
+        the deficit its own deduction created. So the Nth concurrent caller waits N times as
+        long as the first, which is a queue -- and the arithmetic that forms the queue happens
+        while the lock is held, while the sleeping happens outside it, so callers wait on the
+        rate rather than on each other.
+
+        An earlier version refilled to `float(tokens)` after sleeping. That was an absolute
+        assignment, not an increment: two threads sleeping concurrently each restored the
+        bucket the other had just spent, minting tokens out of nothing. Measured at 196
+        requests per provider-minute against a documented cap of 30 -- which TinyFish answers
+        with 429s that stall the whole enrichment stage.
+
+        There is still no retry loop. A deficit of `d` tokens takes `d / rate` seconds, so one
+        sleep is always enough and an injected `sleep` that does not really advance time
+        cannot spin this method forever.
         """
         if tokens < 1:
             raise ValueError("tokens must be at least 1")
         if tokens > self.capacity:
             raise ValueError(f"cannot take {tokens} tokens from a bucket holding {self.capacity}")
 
-        self._refill()
-        waited = 0.0
-        if self._tokens < tokens:
-            waited = (tokens - self._tokens) / self.rate
+        with self._lock:
+            self._refill()
+            deficit = tokens - self._tokens
+            # Deduct before releasing the lock. A caller that sleeps without having deducted
+            # is invisible to everyone else, and every concurrent caller then computes its
+            # wait against a balance that nobody has spent yet.
+            self._tokens -= tokens
+            waited = deficit / self.rate if deficit > 0 else 0.0
+
+        if waited > 0:
             self._sleep(waited)
-            # That sleep bought exactly the deficit, by construction.
-            self._tokens = float(tokens)
-            self._updated = self._clock()
-        self._tokens -= tokens
         return waited
 
 

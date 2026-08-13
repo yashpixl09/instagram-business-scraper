@@ -20,7 +20,9 @@ Two sentinels, and the difference between them is the point:
 from __future__ import annotations
 
 import json
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 import httpx
@@ -70,6 +72,78 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+class ThreadSafeClock:
+    """`FakeClock` for many threads: shared virtual time, guarded.
+
+    Measures PROVIDER time rather than wall time, so a rate limit can be checked exactly
+    instead of by timing a real sleep and hoping the machine was not busy.
+    """
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self.now
+
+    def sleep(self, seconds: float) -> None:
+        with self._lock:
+            self.now += seconds
+
+
+class TokenBucketConcurrencyTests(unittest.TestCase):
+    """One bucket, eight threads -- the shape `worker-enrich` actually runs.
+
+    An earlier `take()` refilled to `float(tokens)` after sleeping. An absolute assignment,
+    not an increment: two threads sleeping at once each restored what the other had spent,
+    minting tokens from nothing. Measured at 196 requests per provider-minute against a cap
+    of 30, which TinyFish answers with 429s that stall the whole enrichment stage.
+
+    The assertion is on ELAPSED PROVIDER TIME, not on a request count. A count says how many
+    got through and not whether they were entitled to; time is what the limit is denominated
+    in, and minted tokens show up as time that was never spent.
+    """
+
+    CAPACITY = 30
+    WINDOW = 60.0
+    THREADS = 8
+    EACH = 20
+
+    def test_eight_threads_cannot_mint_tokens_between_them(self):
+        clock = ThreadSafeClock()
+        bucket = TokenBucket(self.CAPACITY, self.WINDOW, clock=clock, sleep=clock.sleep)
+        start = threading.Barrier(self.THREADS)
+
+        def worker() -> None:
+            start.wait()  # maximise the overlap that the old version got wrong
+            for _ in range(self.EACH):
+                bucket.take(1)
+
+        with ThreadPoolExecutor(max_workers=self.THREADS) as pool:
+            list(pool.map(lambda _: worker(), range(self.THREADS)))
+
+        total = self.THREADS * self.EACH
+        # A full bucket is free at t=0; every token beyond it has to have been earned.
+        required = (total - self.CAPACITY) / (self.CAPACITY / self.WINDOW)
+        self.assertGreaterEqual(
+            clock(),
+            required - 0.01,
+            f"{total} requests took {clock():.1f}s of provider time but are only entitled "
+            f"to arrive after {required:.1f}s -- the difference was minted",
+        )
+
+    def test_a_single_thread_still_pays_the_same_rate(self):
+        # The guard against fixing concurrency by making everything slow: the serial path
+        # must be unchanged.
+        clock = ThreadSafeClock()
+        bucket = TokenBucket(self.CAPACITY, self.WINDOW, clock=clock, sleep=clock.sleep)
+        for _ in range(self.CAPACITY):
+            self.assertEqual(bucket.take(1), 0.0, "a full bucket should not make anyone wait")
+        self.assertEqual(clock(), 0.0)
+        self.assertAlmostEqual(bucket.take(1), self.WINDOW / self.CAPACITY, places=6)
 
 
 class Recorder:
