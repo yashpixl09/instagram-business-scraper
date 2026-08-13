@@ -29,6 +29,7 @@ import os
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -74,7 +75,12 @@ from lead_engine.geo.scope import GeoScope, ResolvedLocation, radius_for
 from lead_engine.niches import NICHE_PROFILES, UnsupportedNicheError
 from lead_engine.providers.budget import BudgetExhausted
 from lead_engine.providers.errors import ProviderError
-from lead_engine.providers.searchapi import PROVIDER, build_outcome, resolve_query
+from lead_engine.providers.searchapi import (
+    GOOGLE_MAPS_SOURCE,
+    PROVIDER,
+    build_outcome,
+    resolve_query,
+)
 
 try:
     import psycopg
@@ -257,6 +263,10 @@ class MemoryBusinesses:
         self.place_ids: set[str] = set()
         self.dedupe_keys: set[str] = set()
         self.stored: list[dict] = []
+        #: Append-only, exactly as `enrichments` is. A dict keyed on business would hide the
+        #: property that makes the real table useful -- one row per observation is what turns
+        #: a review count into a time series.
+        self.evidence: list[dict] = []
 
     def known(self, place_ids, dedupe_keys):
         return (
@@ -276,6 +286,20 @@ class MemoryBusinesses:
                 "dedupe_key": dedupe_key,
                 "city": city,
                 "search_area": search_area,
+            }
+        )
+        return SimpleNamespace(id=uuid.uuid4())
+
+    def record_evidence(self, business_id, *, source, data, source_url=None, run_id=None):
+        status = "ok" if any(value is not None for value in data.values()) else "no_data"
+        self.evidence.append(
+            {
+                "business_id": business_id,
+                "source": source,
+                "status": status,
+                "data": dict(data),
+                "source_url": source_url,
+                "run_id": run_id,
             }
         )
         return SimpleNamespace(id=uuid.uuid4())
@@ -1346,3 +1370,110 @@ def test_the_provider_is_asked_for_the_whole_page_it_was_paid_for():
     # on what it KEEPS is a separate and deliberate thing, and it still ran here.
     assert [o.truncated for o in rig.provider.outcomes] == [0]
     assert len(outcome.businesses) == 2
+
+
+# --- the evidence that arrived free with the search -----------------------------------------
+
+
+def test_every_stored_business_records_what_the_search_observed():
+    """Reviews and rating arrive in the same billed response as the lead, and `Lead` has
+    nowhere to hold them. They used to be dropped on the floor.
+
+    They are the half of the qualification the score cannot see. `Lead` carries website and
+    phone -- the GAP -- while these say whether anyone is actually walking in. Without them
+    every business bands `unknown` and the sheet ranks on website-gap alone, so a dead salon
+    with no site outranks a packed one with a bad site: the exact inversion of who is worth
+    the drive across Bangalore.
+    """
+    rig = build({"cafe": cafes(3)})
+    rig.service.discover(request())
+
+    assert len(rig.businesses.evidence) == len(rig.businesses.stored)
+    assert [row["source"] for row in rig.businesses.evidence] == [GOOGLE_MAPS_SOURCE] * 3
+    assert all(row["data"]["reviews"] == 210 for row in rig.businesses.evidence)
+    assert all(row["data"]["rating"] == 4.4 for row in rig.businesses.evidence)
+
+
+def test_the_evidence_follows_the_business_it_belongs_to():
+    """Keyed on `provider_id`, never by position.
+
+    Dedupe and ranking reorder the lead tuple downstream, so a positional pairing would
+    quietly attach one business's review count to another -- and a wrong number on a sheet is
+    worse than a blank one, because the operator says it out loud.
+    """
+    pages = {
+        "cafe": [
+            {**place("cafe-a", "Third Wave Coffee A", "Cafe"), "reviews": 11, "rating": 3.1},
+            {**place("cafe-b", "Third Wave Coffee B", "Cafe"), "reviews": 909, "rating": 4.9},
+        ]
+    }
+    rig = build(pages)
+    outcome = rig.service.discover(request())
+
+    by_id = {row["business_id"]: row["data"] for row in rig.businesses.evidence}
+    for found in outcome.businesses:
+        assert by_id[found.business_id]["reviews"] == (11 if "A" in found.lead.name else 909)
+
+
+def test_a_place_with_no_review_count_is_recorded_as_no_data_not_skipped():
+    """"Asked Google, it had nothing" and "never asked" must be distinguishable.
+
+    Only the second is worth spending another credit on.
+    """
+    bare = {**place("cafe-x", "Filter Coffee Corner", "Cafe")}
+    bare.pop("reviews")
+    bare.pop("rating")
+    rig = build({"cafe": [bare]})
+
+    rig.service.discover(request())
+
+    assert len(rig.businesses.evidence) == 1
+    row = rig.businesses.evidence[0]
+    assert row["status"] == "no_data"
+    assert row["data"] == {"reviews": None, "rating": None}
+
+
+def test_the_run_is_stamped_on_the_evidence():
+    # So a review count can be traced to the run that paid for it.
+    run_id = uuid.uuid4()
+    rig = build({"cafe": cafes(1)})
+    rig.service.discover(request(run_id=run_id))
+    assert rig.businesses.evidence[0]["run_id"] == run_id
+
+
+def test_the_memory_store_implements_everything_the_real_one_does():
+    """A fake missing a method the protocol grew is how the widening goes unnoticed: the
+    service calls it, only production has it, and the suite stays green. The budget ledger
+    drifted this way and it took a live database to surface."""
+    import inspect
+
+    from lead_engine.discovery.service import RepositoryBusinesses
+
+    for name in ("known", "store", "record_evidence"):
+        real = inspect.signature(getattr(RepositoryBusinesses, name))
+        fake = inspect.signature(getattr(MemoryBusinesses, name))
+        assert set(real.parameters) - {"self"} == set(fake.parameters) - {"self"}, name
+
+
+def test_the_source_written_is_the_source_the_sheet_reads():
+    """`enrichments.source` is the DATA's name, not the vendor's.
+
+    Discovery once wrote `searchapi` -- the vendor -- while `lead_bands` and the export query
+    both read `google_maps`. Sixteen rows landed on disk, nothing read them, every business
+    banded `unknown`, and the sheet silently ranked on website-gap alone. Both halves are
+    pinned here so the next divergence fails instead of going quiet.
+    """
+    from lead_engine.export.excel import GOOGLE_SOURCE
+
+    views = (Path(__file__).parent.parent / "migrations" / "0009_views.sql").read_text(
+        encoding="utf-8"
+    )
+
+    rig = build({"cafe": cafes(1)})
+    rig.service.discover(request())
+
+    written = rig.businesses.evidence[0]["source"]
+    assert written == GOOGLE_MAPS_SOURCE
+    assert written == GOOGLE_SOURCE
+    assert f"source = '{written}'" in views
+    assert written != PROVIDER, "the vendor's name is not the data's name"

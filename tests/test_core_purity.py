@@ -40,6 +40,20 @@ ALLOWED_SUBMODULES = {"urllib.parse"}
 
 PURE = ("models.py", "dedupe.py", "scoring.py", "ranking.py", "copy.py", "niches.py")
 
+#: Top-level modules that are deliberately NOT pure.
+#:
+#: `cli.py` and `config.py` sit at the top level because they are entry points -- what a
+#: person types and what a process reads on boot -- and both necessarily import the outside
+#: world: argparse and the service layer, pydantic-settings and the filesystem.
+#:
+#: Listed separately rather than added to `PURE`, which would be the tempting fix and the
+#: wrong one: they would then fail the import check instead, and silencing that would mean
+#: widening `FORBIDDEN` and disarming the guard for the six modules it exists to protect.
+#:
+#: Adding a name here is a deliberate act. A new top-level module belongs in `PURE` unless
+#: someone decides otherwise, which is what the accounting test below enforces.
+SURFACES = ("cli.py", "config.py")
+
 
 def is_allowed(dotted: str) -> bool:
     return any(
@@ -86,17 +100,55 @@ class CorePurityTests(unittest.TestCase):
                 self.assertTrue(path.is_file(), f"{path} is missing")
                 self.assertEqual(violations(path.read_text(encoding="utf-8")), [])
 
-    def test_every_pure_module_is_accounted_for(self):
-        # A new module in the core is pure until someone decides otherwise. Listing it in
-        # PURE has to be a deliberate act, so a missing name fails here rather than
-        # silently going unchecked.
+    def test_every_top_level_module_is_accounted_for(self):
+        # A new module in the core is pure until someone decides otherwise. Classifying it
+        # has to be a deliberate act, so an unlisted name fails here rather than silently
+        # going unchecked -- in either direction. A new pure module that nobody added to
+        # PURE would never have its imports examined, and a new impure one dropped into
+        # SURFACES without thought is how the boundary erodes.
         on_disk = {
             path.name
             for path in CORE.glob("*.py")
             if path.name != "__init__.py" and not path.name.startswith("_")
         }
 
-        self.assertEqual(on_disk - set(PURE), set())
+        unclassified = on_disk - set(PURE) - set(SURFACES)
+        self.assertEqual(
+            unclassified,
+            set(),
+            f"{sorted(unclassified)} is neither in PURE nor SURFACES. Decide which it is: "
+            f"PURE means its imports are policed, SURFACES means it is an entry point that "
+            f"may reach the outside world.",
+        )
+
+    def test_the_two_categories_do_not_overlap(self):
+        # A name in both would be checked and exempted at once, and the exemption would win.
+        self.assertEqual(set(PURE) & set(SURFACES), set())
+
+    def test_the_surfaces_really_do_depend_on_the_impure_layer(self):
+        # The counterweight. Without it SURFACES becomes a place to file a module that could
+        # have stayed pure, and the exemption list grows until it means nothing.
+        #
+        # The test is on TRANSITIVE dependence, not direct imports. `cli.py` imports only
+        # argparse and first-party names; its impurity arrives through `.api.deps`, which
+        # owns a connection pool. Checking direct imports would call it pure and demand it be
+        # policed -- at which point the policing would fail, correctly, one level down.
+        impure_packages = {"api", "db", "providers", "discovery", "export", "geo"}
+        for filename in SURFACES:
+            path = CORE / filename
+            with self.subTest(module=filename):
+                self.assertTrue(path.is_file(), f"{path} is listed but missing")
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                reached = {
+                    (node.module or "").split(".")[0]
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom) and node.level
+                }
+                self.assertTrue(
+                    reached & impure_packages or violations(path.read_text(encoding="utf-8")),
+                    f"{filename} reaches nothing impure, directly or through a subpackage, "
+                    f"so it does not need an exemption. Move it to PURE.",
+                )
 
     def test_the_check_still_rejects_network_urllib(self):
         # Guarding the guard: the urllib.parse allowance is a hole in FORBIDDEN, and this

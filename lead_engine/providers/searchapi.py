@@ -104,7 +104,18 @@ from lead_engine.niches import (
 from lead_engine.providers.budget import fingerprint
 from lead_engine.providers.errors import ProviderError, bad_response, from_status, unavailable
 
+#: Who we buy from. Names the budget ledger's rows, because credits belong to a vendor.
 PROVIDER = "searchapi"
+
+#: What the data IS, which is a different question and names `enrichments.source`.
+#:
+#: The distinction is load-bearing. Reviews and ratings are Google's; SearchAPI is one of
+#: several vendors that will sell them to us, and swapping vendors must not orphan every
+#: enrichment row already written. `lead_bands` (migration 0009) and the export query both
+#: read `source = 'google_maps'`, so writing the vendor name here instead stores the evidence
+#: somewhere nothing looks -- which is exactly what happened: sixteen rows on disk, every
+#: business still banding `unknown`, and a sheet that ranked on website-gap alone.
+GOOGLE_MAPS_SOURCE = "google_maps"
 
 ENDPOINT = "https://www.searchapi.io/api/v1/search"
 ENGINE = "google_maps"
@@ -198,6 +209,12 @@ class SearchOutcome:
     page: int
     location_label: str
     leads: tuple[Lead, ...] = ()
+    #: Audience signals per kept lead, keyed on `provider_id`. Reviews and rating arrive in
+    #: the same billed response as the lead itself and `Lead` has nowhere to hold them, so
+    #: without this they are paid for and thrown away -- and every business bands `unknown`,
+    #: which reduces the sheet to a ranking by website-gap and drops the half of the thesis
+    #: that says a lead needs real customers to be worth visiting.
+    evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
     rejected_types: dict[str, int] = field(default_factory=dict)
     returned: int = 0
     qualified: int = 0
@@ -332,6 +349,7 @@ def build_outcome(
     city = city_for(location)
 
     leads: list[Lead] = []
+    evidence: dict[str, dict[str, Any]] = {}
     rejected_types: dict[str, int] = {}
     qualified = 0
     name_gate_rejected = 0
@@ -346,6 +364,17 @@ def build_outcome(
             # the other 15 results it has already paid for.
             if len(leads) < limit:
                 leads.append(replace(lead, matched_niches=[profile.id]))
+                # Reviews and rating arrived in the same billed response as the lead, and
+                # `Lead` has nowhere to put them. Dropping them here means buying them again
+                # later at a credit apiece -- and until they are stored every business bands
+                # `unknown`, which turns the sheet into a ranking by website-gap alone and
+                # loses the half of the thesis that says a lead needs real customers.
+                #
+                # Keyed on provider_id rather than parallel to `leads`, because dedupe and
+                # ranking reorder that tuple downstream and a positional pairing would
+                # silently attach one business's review count to another.
+                if lead.provider_id:
+                    evidence[lead.provider_id] = evidence_from_place(place)
             continue
 
         slugs = distinct_slugs(lead)
@@ -364,6 +393,7 @@ def build_outcome(
         page=page,
         location_label=location.label,
         leads=tuple(leads),
+        evidence=evidence,
         # Biggest offender first, so a run summary that prints only the head of this dict
         # prints the thing worth looking at. Dict equality ignores order, so tests are
         # unaffected by the sort.

@@ -78,8 +78,8 @@ from lead_engine.providers.budget import BudgetExhausted
 # including before the niche tally, since a nameless place is evidence about the response
 # rather than about the registry. Imported rather than re-typed, because a filter comparing
 # against a copy of a literal is a filter that stops working the day the literal moves.
+from lead_engine.providers.searchapi import GOOGLE_MAPS_SOURCE, SearchOutcome
 from lead_engine.providers.searchapi import UNNAMED as UNNAMED_SENTINEL
-from lead_engine.providers.searchapi import SearchOutcome
 
 from .cells import (
     BREADTH_FIRST,
@@ -185,6 +185,23 @@ class BusinessStore(Protocol):
         search_area: str | None = None,
     ) -> Any: ...
 
+    def record_evidence(
+        self,
+        business_id: UUID,
+        *,
+        source: str,
+        data: dict[str, Any],
+        source_url: str | None = None,
+        run_id: UUID | None = None,
+    ) -> Any:
+        """Append what this search observed about the business, not just that it exists.
+
+        Separate from `store` because `enrichments` is append-only and `businesses` is not:
+        one row per observation is what turns a review count into a time series, and a salon
+        going 180 -> 340 reviews in two months is a buying signal no snapshot can show.
+        """
+        ...
+
 
 class SearchLedger(Protocol):
     """`providers.budget.SearchBudget`, narrowed to what discovery is allowed to do with it.
@@ -209,6 +226,10 @@ class DiscoveredBusiness:
     dedupe_key: str
     area: str | None = None
     business_id: UUID | None = None
+    #: Reviews and rating as Google reported them, in `models.Evidence`'s vocabulary. Carried
+    #: on the result as well as written to `enrichments` so a caller scoring this pass does
+    #: not have to read back what it just wrote.
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -264,6 +285,9 @@ class DiscoveryRequest:
     policy: CellPolicy = BREADTH_FIRST
     #: Hard ceiling on billed searches for this pass. Required when no budget is injected.
     max_searches: int | None = None
+    #: Stamped onto every enrichment this pass writes, so a review count can be traced back
+    #: to the run that paid for it. Optional: a caller may discover without a run row.
+    run_id: UUID | None = None
 
 
 # --- the prototype's allocation, ported ---------------------------------------------------
@@ -357,6 +381,28 @@ class RepositoryBusinesses:
             lng=lead.longitude,
             phone=lead.phone,
             website=lead.website,
+        )
+
+    def record_evidence(
+        self,
+        business_id: UUID,
+        *,
+        source: str,
+        data: dict[str, Any],
+        source_url: str | None = None,
+        run_id: UUID | None = None,
+    ) -> Any:
+        # `no_data` rather than `ok` when Google returned the place but no review count.
+        # A later pass can then tell "asked, and there was nothing" from "never asked", and
+        # only the second one is worth spending another credit on.
+        status = "ok" if any(value is not None for value in data.values()) else "no_data"
+        return self._repository.insert_enrichment(
+            business_id=business_id,
+            source=source,
+            status=status,
+            data=data,
+            source_url=source_url,
+            run_id=run_id,
         )
 
 
@@ -595,13 +641,35 @@ class DiscoveryService:
                 search_area=item.area,
             )
             state.remember(lead, key)
+            business_id = getattr(row, "id", None)
+
+            # Persist the audience signals that came free with this search. Reviews and
+            # rating are the half of the qualification the score cannot see -- `Lead` carries
+            # website and phone, which is the GAP, while these say whether anyone is actually
+            # walking in. Without them every business bands `unknown`, and the sheet ranks by
+            # website-gap alone: a dead salon with no site outranks a packed one with a bad
+            # site, which inverts who is worth visiting.
+            #
+            # Recorded even when the values are absent, so a later pass can tell "asked
+            # Google, it had no review count" from "never asked".
+            signals = outcome.evidence.get(lead.provider_id or "", {})
+            if business_id is not None:
+                self._businesses.record_evidence(
+                    business_id,
+                    source=GOOGLE_MAPS_SOURCE,
+                    data=signals,
+                    source_url=lead.source_url,
+                    run_id=request.run_id,
+                )
+
             state.businesses.append(
                 DiscoveredBusiness(
                     lead=lead,
                     niche_id=profile.id,
                     dedupe_key=key,
                     area=item.area,
-                    business_id=getattr(row, "id", None),
+                    business_id=business_id,
+                    evidence=signals,
                 )
             )
         state.kept[profile.id] = state.kept.get(profile.id, 0) + len(fresh)
