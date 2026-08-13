@@ -8,6 +8,12 @@ credentials.json
 token.json
 service-account*.json
 
+# The whole directory, not a filename pattern. Google names service-account keys
+# `<project-id>-<hash>.json`, which matches none of the patterns above -- so a
+# pattern-based rule silently fails to cover the exact file it exists to protect.
+credentials/
+!credentials/.gitkeep
+
 # ── Browser session data ──────────────────────────────
 # Chrome profiles carry live cookies and auth tokens.
 chrome-profile/

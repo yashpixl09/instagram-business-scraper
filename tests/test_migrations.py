@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -66,6 +67,10 @@ EXPECTED_TABLES = {
     # 0007 llm
     "llm_calls",
     "llm_rate_buckets",
+    # 0010 budget
+    "search_budget",
+    # 0012 niche verification
+    "niche_status",
     # the runner's own ledger
     "schema_migrations",
 }
@@ -183,6 +188,39 @@ def test_a_second_run_applies_nothing(conn):
 def test_the_ledger_matches_the_files_on_disk(db):
     recorded = [row[0] for row in db.execute("SELECT version FROM schema_migrations ORDER BY 1")]
     assert recorded == [path.stem for path in migration_files()]
+
+
+def test_two_runners_starting_together_do_not_race(conn):
+    """Two workers booting at once must not both apply the schema.
+
+    The assertion is on what each call *returned*, not on the state it left behind. The
+    ledger is the wrong thing to check: ten rows and every table present is equally
+    consistent with the lock working and with one runner having lost a race it should never
+    have been in. Only the return values distinguish "one applied, one correctly did
+    nothing" from "both tried" -- the same reason a budget ledger reading 100 says nothing
+    about how many billed requests went out.
+
+    Without the advisory lock this fails loudly rather than subtly: both runners read an
+    empty ledger, both start applying, and the loser raises DuplicateTable partway through
+    with half a schema behind it.
+    """
+    schema = current_schema(conn)
+
+    def run() -> list[str]:
+        with psycopg.connect(DSN) as other:
+            other.execute(f'SET search_path = "{schema}", public')
+            other.commit()
+            return apply_migrations(other)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run), pool.submit(run)]
+        results = sorted((future.result() for future in futures), key=len)
+
+    assert results[0] == []
+    assert results[1] == [path.stem for path in migration_files()]
+    # And exactly one ledger row per file: no version recorded twice.
+    recorded = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
+    assert recorded == len(migration_files())
 
 
 def test_every_migration_is_numbered_and_unique():
