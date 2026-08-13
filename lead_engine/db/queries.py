@@ -95,6 +95,30 @@ UPDATE tasks t
 RETURNING {column_list(TaskRow, "t.")}
 """
 
+#: Push one task's deadline out from NOW, not from when its batch was claimed.
+#:
+#: A worker handed five tasks at once holds five leases that all started together. Renewing
+#: as each task begins is what makes a serial worker's leases describe the work actually in
+#: progress rather than the moment the batch was handed over.
+#:
+#: Guarded on ownership and status: a worker must not extend a lease on a task the reaper has
+#: already taken back and given to someone else. Returning no row is the signal that happened.
+RENEW_LEASE = f"""
+UPDATE tasks
+   SET lease_expires = now() + %(lease)s::interval
+ WHERE id = %(task_id)s
+   AND locked_by = %(worker_id)s
+   AND status = 'running'
+RETURNING {column_list(TaskRow)}
+"""
+
+#: Only a RUNNING task may be completed.
+#:
+#: Without the status guard a late duplicate -- a worker whose lease the reaper already
+#: reclaimed, finishing anyway -- revives a task that is `dead` and reports it `done`, or
+#: overwrites the result of a task some other worker already finished. Returning no row is
+#: how the caller learns it no longer owns the task, which is information it needs and
+#: cannot get any other way.
 COMPLETE_TASK = f"""
 UPDATE tasks
    SET status = 'done',
@@ -103,6 +127,7 @@ UPDATE tasks
        locked_by = NULL,
        lease_expires = NULL
  WHERE id = %(task_id)s
+   AND status = 'running'
 RETURNING {TASK_COLUMNS}
 """
 
@@ -117,6 +142,11 @@ _BACKOFF = "now() + (least(pow(2, attempts), 3600) * interval '1 second')"
 # `attempts >= max_attempts` reads "this delivery was the last one it was entitled to".
 # 'dead' is terminal and deliberately not 'failed': nothing retries it, and the row stays
 # with its final error for whoever asks why the run is short.
+#: Only a RUNNING task may be failed. Same guard as COMPLETE_TASK, and the worse direction:
+#: failing an already-`done` task flips it back to `retry` while KEEPING its stale result, so
+#: it is delivered a second time and performed twice -- for a discovery task, a second billed
+#: search for a cell already swept. A further failure then marks it `dead`, and the run
+#: reports a task buried that in fact succeeded.
 FAIL_TASK = f"""
 UPDATE tasks
    SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'retry' END,
@@ -125,6 +155,7 @@ UPDATE tasks
        lease_expires = NULL,
        available_at = {_BACKOFF}
  WHERE id = %(task_id)s
+   AND status = 'running'
 RETURNING {TASK_COLUMNS}
 """
 

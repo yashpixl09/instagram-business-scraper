@@ -186,9 +186,19 @@ class Repository:
         rows this one would have taken -- `SKIP LOCKED` skips them rather than waiting. An
         empty list therefore means "nothing for me right now", never "the queue is empty".
 
-        `lease` is any Postgres interval literal. It should exceed the worst-case runtime
-        of the task type, because the reaper's job is to notice dead workers and a lease
-        shorter than the work turns every slow task into a duplicated one.
+        `lease` is any Postgres interval literal, and with `batch > 1` it must exceed the
+        worst case for the WHOLE BATCH, not for one task.
+
+        Every row in a batch is stamped from a single `now()`, evaluated once for the
+        statement -- so the last task in a batch of five is already four tasks' worth of
+        runtime into its lease before the worker looks at it. Size the lease per task and
+        the reaper reclaims the tail of every batch while the worker is still working it,
+        a second worker picks those tasks up, and each one is performed twice. For a
+        discovery task that is two billed Google Maps searches for one cell, on an
+        allowance that does not renew.
+
+        Either size the lease as `batch x per-task worst case`, or call `renew_lease()` as
+        each task begins, which is what a worker processing a batch serially should do.
         """
         return self._all(
             queries.CLAIM_TASKS,
@@ -197,6 +207,26 @@ class Repository:
             {"types": list(types), "batch": batch, "worker_id": worker_id, "lease": lease},
             TaskRow,
         )
+
+    def renew_lease(
+        self, task_id: int, worker_id: str, lease: str = "60 seconds"
+    ) -> TaskRow | None:
+        """Push this task's deadline out from now. Returns None if the caller no longer owns it.
+
+        A worker handed a batch holds leases that all began at the same instant, so a serial
+        worker should renew as each task starts -- otherwise the tail of every batch is
+        reclaimed mid-flight and done twice.
+
+        None means the reaper already took the task back, or another worker holds it. That is
+        the signal to STOP, not to retry: whatever this worker was about to do, someone else
+        is doing. Continuing is how one cell becomes two billed searches.
+        """
+        rows = self._all(
+            queries.RENEW_LEASE,
+            {"task_id": task_id, "worker_id": worker_id, "lease": lease},
+            TaskRow,
+        )
+        return rows[0] if rows else None
 
     def complete(self, task_id: int, result: dict[str, Any] | None = None) -> TaskRow | None:
         """Mark a task done and record what it produced. None if no such task."""

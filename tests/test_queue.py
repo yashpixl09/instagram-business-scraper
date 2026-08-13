@@ -120,6 +120,9 @@ class QueueTestCase(unittest.TestCase):
         goal = self.repo.create_goal("blr salons", {"city": "Bangalore", "niche": "salon"})
         return self.repo.create_run(goal.id, trigger="manual")
 
+    def status_of(self, task_id):
+        return self.sql("SELECT status FROM tasks WHERE id = %s", (task_id,))[0][0]
+
     def enqueue(self, run, type="discover", *, idem_key=None, **kwargs):
         key = idem_key or f"{type}:{uuid.uuid4()}"
         inserted = self.repo.enqueue(run.id, type, {"key": key}, idem_key=key, **kwargs)
@@ -333,6 +336,84 @@ class CompletionTests(QueueTestCase):
 
     def test_complete_on_a_missing_task_returns_none(self):
         self.assertIsNone(self.repo.complete(999999, {"found": 0}))
+
+
+class OwnershipGuardTests(QueueTestCase):
+    """A worker may only finish a task it still holds.
+
+    Without these guards a late duplicate -- a worker whose lease the reaper reclaimed,
+    finishing anyway -- writes over a task somebody else now owns. The worst direction is
+    `fail()` on a task already `done`: the row flips back to `retry` keeping its stale
+    result, so the task is delivered and performed a second time. For a discovery task that
+    is a second billed Google Maps search for a cell already swept, on an allowance that does
+    not renew.
+    """
+
+    def test_completing_a_task_you_no_longer_hold_changes_nothing(self):
+        run = self.a_run()
+        task_id = self.enqueue(run)
+        claimed = self.repo.claim("worker-a", ["discover"])[0]
+        self.repo.complete(claimed.id, {"ok": True})
+
+        # The late duplicate arrives and tries to finish the same task.
+        self.assertIsNone(self.repo.complete(task_id, {"ok": "from the zombie"}))
+        row = self.sql("SELECT status, result FROM tasks WHERE id = %s", (task_id,))[0]
+        self.assertEqual(row[0], "done")
+        self.assertEqual(row[1], {"ok": True}, "the first worker's result was overwritten")
+
+    def test_failing_a_finished_task_does_not_resurrect_it(self):
+        run = self.a_run()
+        task_id = self.enqueue(run)
+        claimed = self.repo.claim("worker-a", ["discover"])[0]
+        self.repo.complete(claimed.id, {"leads": 12})
+
+        self.assertIsNone(self.repo.fail(task_id, "zombie worker reporting a timeout"))
+        status = self.sql("SELECT status FROM tasks WHERE id = %s", (task_id,))[0][0]
+        self.assertEqual(status, "done", "a done task was flipped back and would run twice")
+
+    def test_a_dead_task_cannot_be_revived_by_a_late_completion(self):
+        run = self.a_run()
+        task_id = self.enqueue(run)
+        with self.pool.connection() as connection:
+            connection.execute("UPDATE tasks SET max_attempts = 1 WHERE id = %s", (task_id,))
+        claimed = self.repo.claim("worker-a", ["discover"])[0]
+        self.repo.fail(claimed.id, "provider timeout")
+        self.assertEqual(self.status_of(task_id), "dead")
+
+        self.assertIsNone(self.repo.complete(task_id, {"ok": True}))
+        self.assertEqual(self.status_of(task_id), "dead")
+
+
+class RenewLeaseTests(QueueTestCase):
+    """Every row in a batch is stamped from one `now()`.
+
+    So the last task of a batch of five is four tasks' runtime into its lease before the
+    worker looks at it. A serial worker renews as each task begins; otherwise the reaper
+    reclaims the tail of every batch mid-flight and each of those tasks is done twice.
+    """
+
+    def test_renewing_pushes_the_deadline_out(self):
+        run = self.a_run()
+        self.enqueue(run)
+        claimed = self.repo.claim("worker-a", ["discover"], lease="5 seconds")[0]
+        renewed = self.repo.renew_lease(claimed.id, "worker-a", lease="10 minutes")
+        self.assertIsNotNone(renewed)
+        self.assertGreater(renewed.lease_expires, claimed.lease_expires)
+
+    def test_renewing_a_task_another_worker_holds_returns_none(self):
+        # The signal to STOP. Whatever this worker was about to do, someone else is doing --
+        # and continuing is exactly how one cell becomes two billed searches.
+        run = self.a_run()
+        self.enqueue(run)
+        claimed = self.repo.claim("worker-a", ["discover"])[0]
+        self.assertIsNone(self.repo.renew_lease(claimed.id, "worker-b"))
+
+    def test_renewing_a_reclaimed_task_returns_none(self):
+        run = self.a_run()
+        self.enqueue(run)
+        claimed = self.repo.claim("worker-a", ["discover"], lease="-1 seconds")[0]
+        self.repo.reap_expired_leases()
+        self.assertIsNone(self.repo.renew_lease(claimed.id, "worker-a"))
 
 
 class BackoffTests(QueueTestCase):

@@ -31,7 +31,13 @@ from ..niches import NicheProfile
 from .errors import ProviderError, bad_response
 from .searchapi import PROVIDER, RESULTS_PER_PAGE, build_outcome, resolve_query
 
-__all__ = ["FixtureMapsProvider", "FixtureNotFound", "fixture_name", "record_fixture"]
+__all__ = [
+    "FixtureMapsProvider",
+    "FixtureNotFound",
+    "fixture_name",
+    "record_fixture",
+    "scrub_payload",
+]
 
 
 class FixtureNotFound(LookupError):
@@ -111,19 +117,86 @@ class FixtureMapsProvider:
         )
 
 
+_SECRET_PARAMS = ("api_key", "apikey", "key", "token", "access_token")
+_REDACTED = "REDACTED"
+
+
+def scrub_payload(payload: Any, api_key: str | None = None) -> Any:
+    """Strip credentials out of a response before it is written to disk.
+
+    `SearchApiClient` sends the key as a query parameter by default, and SearchAPI echoes the
+    request back in `search_metadata`. Fixtures are committed to the repository. Without this,
+    the first recording of a live response is the single most likely place in this codebase
+    for a working credential to be published -- and it would look like an ordinary test asset,
+    which is exactly why nobody would check it.
+
+    Three independent passes, because each alone has a gap the others cover:
+
+      * any field NAMED like a credential has its value replaced outright. SearchAPI echoes
+        `search_parameters.api_key` as a bare string, which is not a URL and which the pass
+        below would therefore walk straight past;
+      * every URL-shaped string has its secret query parameters replaced. Both of these work
+        without knowing the key, so they still cover a key this process never held -- a
+        fixture pasted in by hand, or one recorded under a key since rotated;
+      * if the key IS known, every remaining occurrence is replaced wherever it sits. This
+        covers shapes nobody anticipated, which is the category that matters, since the
+        anticipated ones are already handled above.
+
+    Returns a new structure; the caller's payload is not modified. A recorded fixture must be
+    the response as parsed, minus only the credential -- scrubbing in place would mean the
+    live client saw different data from the fixture derived from it.
+    """
+    if isinstance(payload, dict):
+        return {
+            key: _REDACTED
+            if isinstance(key, str) and key.lower() in _SECRET_PARAMS
+            else scrub_payload(value, api_key)
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [scrub_payload(item, api_key) for item in payload]
+    if isinstance(payload, str):
+        return _scrub_text(payload, api_key)
+    return payload
+
+
+def _scrub_text(text: str, api_key: str | None) -> str:
+    if "?" in text and "=" in text:
+        head, _, query = text.partition("?")
+        pairs = []
+        for pair in query.split("&"):
+            name, sep, value = pair.partition("=")
+            pairs.append(f"{name}={_REDACTED}" if name.lower() in _SECRET_PARAMS else pair)
+            del sep, value
+        text = f"{head}?{'&'.join(pairs)}"
+    if api_key and api_key in text:
+        text = text.replace(api_key, _REDACTED)
+    return text
+
+
 def record_fixture(
-    payload: dict[str, Any], niche_id: str, fixture_dir: str | Path, page: int = 1
+    payload: dict[str, Any],
+    niche_id: str,
+    fixture_dir: str | Path,
+    page: int = 1,
+    *,
+    api_key: str | None = None,
 ) -> Path:
     """Save a live response so the credit that bought it is never spent on the same page twice.
 
-    Takes the body from `SearchApiClient.search_raw` verbatim. Every field Google returned is
-    kept, including ones nothing reads yet: the next thing to consume `popular_times` or
-    `review_results` should not need a fresh credit to see one.
+    Takes the body from `SearchApiClient.search_raw` verbatim, minus credentials -- see
+    `scrub_payload`. Everything else Google returned is kept, including fields nothing reads
+    yet: the next thing to consume `popular_times` or `review_results` should not need a fresh
+    credit to see one.
+
+    Pass `api_key` whenever it is known. Scrubbing works without it, but only for the shapes
+    that have been anticipated.
     """
     directory = Path(fixture_dir)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / fixture_name(niche_id, page)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    scrubbed = scrub_payload(payload, api_key)
+    path.write_text(json.dumps(scrubbed, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
 
 

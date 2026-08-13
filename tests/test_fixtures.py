@@ -37,6 +37,7 @@ from lead_engine.providers.fixtures import (
     FixtureNotFound,
     fixture_name,
     record_fixture,
+    scrub_payload,
 )
 from lead_engine.providers.searchapi import SearchApiClient, resolve_query
 
@@ -158,6 +159,84 @@ class RoundTripTests(FixtureTestCase):
         provider = FixtureMapsProvider(directory)
         self.assertEqual(provider.load("cake_shop", 1), self.PAYLOAD)
         self.assertEqual(provider.load("cake_shop", 2), page_two)
+
+
+class ScrubbingTests(FixtureTestCase):
+    """A recorded fixture must never carry the credential that bought it.
+
+    The client sends the key as a query parameter by default and SearchAPI echoes the request
+    back in `search_metadata`. Fixtures are committed. So the first recording of a live
+    response is the likeliest place in this repository for a working credential to be
+    published -- disguised as an ordinary test asset, which is why nobody would look.
+    """
+
+    LIVE_KEY = "sa-live-9f3c7b21e4d8a6c5f0b3"
+
+    def live_payload(self) -> dict:
+        return {
+            "search_metadata": {
+                "request_url": (
+                    "https://www.searchapi.io/api/v1/search?engine=google_maps&q=salon"
+                    f"&api_key={self.LIVE_KEY}"
+                ),
+                "json_url": f"https://www.searchapi.io/api/v1/searches/x.json?api_key={self.LIVE_KEY}",
+                "id": "search_abc",
+            },
+            "search_parameters": {"api_key": self.LIVE_KEY, "q": "salon", "hl": "en"},
+            "local_results": [{"title": "Blush Salon", "website": "https://blush.example?utm=x"}],
+            "note": f"quota exceeded for {self.LIVE_KEY}",
+        }
+
+    def test_a_recorded_fixture_carries_no_trace_of_the_key(self):
+        path = record_fixture(self.live_payload(), "salon", self.scratch(), api_key=self.LIVE_KEY)
+        self.assertNotIn(self.LIVE_KEY, path.read_text(encoding="utf-8"))
+
+    def test_a_recording_made_without_the_key_still_scrubs_the_echoed_url(self):
+        # The recorder is usable without passing the key, and the URL pass alone closes the
+        # route SearchAPI actually uses to echo it back.
+        path = record_fixture(self.live_payload(), "salon", self.scratch())
+        self.assertNotIn(self.LIVE_KEY, path.read_text(encoding="utf-8").split('"note"')[0])
+
+    def test_the_key_is_scrubbed_from_urls_query_params_and_prose_alike(self):
+        clean = scrub_payload(self.live_payload(), self.LIVE_KEY)
+        for where in (
+            clean["search_metadata"]["request_url"],
+            clean["search_metadata"]["json_url"],
+            clean["search_parameters"]["api_key"],
+            clean["note"],
+        ):
+            with self.subTest(value=where):
+                self.assertNotIn(self.LIVE_KEY, where)
+
+    def test_scrubbing_works_without_knowing_the_key(self):
+        # Covers a fixture recorded under a key this process never held, or one pasted in by
+        # hand. Knowing the key is the better pass; not needing to know it is the safety net.
+        clean = scrub_payload({"u": "https://x.io/s?api_key=NEVERSEENBEFORE&q=1"})
+        self.assertNotIn("NEVERSEENBEFORE", clean["u"])
+        self.assertIn("q=1", clean["u"])
+
+    def test_scrubbing_leaves_everything_that_is_not_a_credential_alone(self):
+        clean = scrub_payload(self.live_payload(), self.LIVE_KEY)
+        self.assertEqual(clean["local_results"][0]["title"], "Blush Salon")
+        # A business's own URL with query parameters is data, not a secret.
+        self.assertEqual(clean["local_results"][0]["website"], "https://blush.example?utm=x")
+        self.assertEqual(clean["search_metadata"]["id"], "search_abc")
+        self.assertEqual(clean["search_parameters"]["q"], "salon")
+
+    def test_scrubbing_does_not_mutate_the_callers_payload(self):
+        # The live client must see exactly what the fixture was derived from; scrubbing in
+        # place would make the recording and the run that produced it disagree.
+        payload = self.live_payload()
+        scrub_payload(payload, self.LIVE_KEY)
+        self.assertEqual(payload["search_parameters"]["api_key"], self.LIVE_KEY)
+
+    def test_the_committed_corpus_carries_no_credential(self):
+        # The corpus was hand-authored, so this is a guard against a future recording being
+        # committed rather than a check on the current files.
+        for path in CORPUS.glob("*.json"):
+            with self.subTest(fixture=path.name):
+                for marker in ("sa-live-", "api_key=sa", '"api_key": "sa'):
+                    self.assertNotIn(marker, path.read_text(encoding="utf-8"))
 
 
 class MissingFixtureTests(FixtureTestCase):
