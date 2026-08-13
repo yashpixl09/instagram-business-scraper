@@ -1,0 +1,39 @@
+# Deliberately isolated from anything else on this machine.
+#
+# `name:` pins the compose project so it can never adopt or reuse containers, volumes or
+# networks created outside it. The host port is 5433 -- not 5432 (the default a local
+# Postgres install would take) and not 5434 (already bound by an unrelated container on
+# this machine). The volume is namespaced for the same reason.
+#
+# `docker compose -f docker-compose.yml down -v` therefore only ever destroys this
+# project's data.
+
+name: lead-engine
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: lead-engine-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lead_engine
+      POSTGRES_PASSWORD: lead_engine_dev
+      POSTGRES_DB: lead_engine
+      # Deterministic collation, so ORDER BY is identical here and in CI.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5433:5432"
+    volumes:
+      - lead_engine_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Without this, workers race the database on `docker compose up` and fail their
+      # first claim with a connection error that looks like a bug in the queue.
+      test: ["CMD-SHELL", "pg_isready -U lead_engine -d lead_engine"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  lead_engine_pgdata:
+    name: lead_engine_pgdata
