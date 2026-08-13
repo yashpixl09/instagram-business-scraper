@@ -207,7 +207,7 @@ class TinyFishClient:
     # -- lifecycle ----------------------------------------------------------------
 
     def close(self) -> None:
-        self._client.close()
+        pass
 
     def __enter__(self) -> TinyFishClient:
         return self

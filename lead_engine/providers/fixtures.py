@@ -1,0 +1,131 @@
+"""A maps provider backed by recorded responses.
+
+This is not a test double. It is how the discovery, scoring and export layers get built and
+demonstrated without spending any of fifty non-renewing SearchAPI credits -- an allowance
+where a single debugging loop against the live API is the most expensive mistake available.
+
+What makes a fixture trustworthy is that nothing is re-implemented here. Parsing,
+qualification and query resolution all come from `searchapi` itself:
+
+    resolve_query   the same variant rules
+    build_outcome   the same place -> Lead conversion and the same matches_niche gate
+
+So a fixture recorded from a live call produces byte-identical leads to that call, and a
+parsing bug shows up in fixture-driven tests instead of hiding until the credits are gone.
+Fixtures are recorded from `SearchApiClient.search_raw`, which returns the response
+untouched -- a fixture derived from parsed output could never catch a parsing bug at all.
+
+The provider never touches the network and never touches the budget. Spending is the live
+client's job, and a fixture run that decremented the ledger would make the operator's
+remaining-credit figure lie.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from ..geo.scope import ResolvedLocation
+from ..niches import NicheProfile
+from .errors import ProviderError, bad_response
+from .searchapi import PROVIDER, RESULTS_PER_PAGE, build_outcome, resolve_query
+
+__all__ = ["FixtureMapsProvider", "FixtureNotFound", "fixture_name", "record_fixture"]
+
+
+class FixtureNotFound(LookupError):
+    """No recorded response for this niche and page.
+
+    Deliberately loud. Returning an empty page instead would be indistinguishable from
+    "Google knows of no salons in Indiranagar", which is a conclusion a developer would
+    act on and a fact this provider is in no position to assert.
+    """
+
+
+def fixture_name(niche_id: str, page: int = 1) -> str:
+    return f"{niche_id}-p{page}.json"
+
+
+class FixtureMapsProvider:
+    """Serves recorded SearchAPI responses through the live client's interface.
+
+    Exposes `.api_key` because the API layer duck-types on that attribute to decide whether
+    a provider is configured. A fixture provider is always configured.
+    """
+
+    api_key = "fixture"
+
+    def __init__(self, fixture_dir: str | Path, *, strict: bool = True) -> None:
+        self.fixture_dir = Path(fixture_dir)
+        self.strict = strict
+        # Requests served, for tests asserting that a run issued the number of searches it
+        # claimed. The live client's equivalent is the budget ledger; this is the free
+        # counterpart, and the property both must satisfy is one call per page.
+        self.calls: list[dict[str, Any]] = []
+
+    def search_places(
+        self,
+        location: ResolvedLocation,
+        profile: NicheProfile,
+        limit: int = RESULTS_PER_PAGE,
+        page: int = 1,
+        query_variant: int | str | None = None,
+    ) -> Any:
+        """One recorded page, qualified against `profile`. Signature matches the live client."""
+        query = resolve_query(profile, query_variant)
+        payload = self.load(profile.id, page)
+        self.calls.append({"niche_id": profile.id, "page": page, "query": query})
+        return build_outcome(payload, profile, location, limit=limit, page=page, query=query)
+
+    def search_raw(
+        self, location: ResolvedLocation, query: str, *, page: int = 1
+    ) -> dict[str, Any]:
+        """The recorded body, unparsed -- mirrors the live client's recording seam."""
+        raise FixtureNotFound(
+            "search_raw needs a niche to find its fixture; call search_places instead"
+        )
+
+    def load(self, niche_id: str, page: int = 1) -> dict[str, Any]:
+        path = self.fixture_dir / fixture_name(niche_id, page)
+        if not path.exists():
+            if self.strict:
+                raise FixtureNotFound(
+                    f"no fixture {path.name!r} in {self.fixture_dir}. Record one with "
+                    f"record_fixture(), or construct the provider with strict=False to "
+                    f"treat a missing page as the end of results."
+                )
+            # Non-strict exists for paging: page 2 legitimately may not have been recorded,
+            # and a sweep walking off the end should stop, not fail.
+            return {"local_results": []}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise _bad(f"fixture {path.name!r} is not valid JSON: {exc}") from exc
+
+    def available(self) -> list[str]:
+        """Niche ids with at least a page 1 recorded."""
+        return sorted(
+            path.stem.rsplit("-p", 1)[0]
+            for path in self.fixture_dir.glob("*-p1.json")
+        )
+
+
+def record_fixture(
+    payload: dict[str, Any], niche_id: str, fixture_dir: str | Path, page: int = 1
+) -> Path:
+    """Save a live response so the credit that bought it is never spent on the same page twice.
+
+    Takes the body from `SearchApiClient.search_raw` verbatim. Every field Google returned is
+    kept, including ones nothing reads yet: the next thing to consume `popular_times` or
+    `review_results` should not need a fresh credit to see one.
+    """
+    directory = Path(fixture_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / fixture_name(niche_id, page)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _bad(message: str) -> ProviderError:
+    return bad_response(message, provider=PROVIDER)

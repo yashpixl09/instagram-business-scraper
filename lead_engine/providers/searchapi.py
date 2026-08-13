@@ -532,25 +532,39 @@ class SearchApiClient:
 
     def query_for(self, profile: NicheProfile, query_variant: int | str | None = None) -> str:
         """Resolve `query_variant` against a profile's query list."""
-        if query_variant is None:
-            return profile.queries[0]
-        if isinstance(query_variant, bool):
-            # `True` would index to queries[1] and quietly buy a different search.
-            raise TypeError("query_variant must be an int index, a string, or None")
-        if isinstance(query_variant, int):
-            if not 0 <= query_variant < len(profile.queries):
-                raise ValueError(
-                    f"query_variant {query_variant} is out of range for niche {profile.id!r}, "
-                    f"which has {len(profile.queries)} queries"
-                )
-            return profile.queries[query_variant]
-        text = str(query_variant).strip()
-        if not text:
-            raise ValueError("query_variant must not be blank")
-        return text
+        return resolve_query(profile, query_variant)
 
 
 # --- helpers -------------------------------------------------------------------------------
+
+
+def resolve_query(profile: NicheProfile, query_variant: int | str | None = None) -> str:
+    """Resolve `query_variant` against a profile's query list.
+
+    A free function, not a method, for the same reason `build_outcome` is one: the fixture
+    provider must resolve a variant identically to the live client, and it cannot do that by
+    borrowing a method from a class that owns an HTTP transport.
+
+        None  the profile's first query -- the breadth-first default
+        int   an index into `profile.queries`, for a deliberate deeper sweep
+        str   sent verbatim, for an operator testing a hunch by hand
+    """
+    if query_variant is None:
+        return profile.queries[0]
+    if isinstance(query_variant, bool):
+        # `True` would index to queries[1] and quietly buy a different search.
+        raise TypeError("query_variant must be an int index, a string, or None")
+    if isinstance(query_variant, int):
+        if not 0 <= query_variant < len(profile.queries):
+            raise ValueError(
+                f"query_variant {query_variant} is out of range for niche {profile.id!r}, "
+                f"which has {len(profile.queries)} queries"
+            )
+        return profile.queries[query_variant]
+    text = str(query_variant).strip()
+    if not text:
+        raise ValueError("query_variant must not be blank")
+    return text
 
 
 def _bad(message: str) -> ProviderError:
