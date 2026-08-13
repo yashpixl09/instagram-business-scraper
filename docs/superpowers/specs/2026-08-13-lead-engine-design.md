@@ -110,10 +110,40 @@ the existing rule that unsupported niches are rejected rather than substituted.
 
 ## Niche Model
 
-The eleven existing profiles in `niches.py` carry forward unchanged: cafe, bakery,
-cake shop, salon, spa, boutique, manufacturer, cloud kitchen, home decor, fitness/gym,
-tutor/class. Each supplies categories, qualification terms, strictness, demand and budget
-bases, and its offer line.
+Twenty-four profiles. The prototype's eleven — cafe, bakery, cake shop, salon, spa,
+boutique, manufacturer, cloud kitchen, home decor, fitness/gym, tutor/class — carry forward
+with their calibrated demand and budget bases, qualification terms, strictness and offer
+lines intact. Thirteen are added for businesses that plausibly lack a good site, have
+budget, and have an obvious automation to pitch: catering, dental clinic, clinic,
+veterinary, auto service, preschool, driving school, photographer, event planner, interior
+designer, real estate, travel agency, professional services.
+
+SearchAPI returns Google's display labels rather than a hierarchy, so `categories` splits
+in two: `queries` drives the search, `include_types` / `exclude_types` /
+`include_suffixes` / `exclude_suffixes` decide what qualifies. Slugifying a display label
+reconstructs the `type_id` SearchAPI omits.
+
+Three rules govern qualification:
+
+**Precedence** is exact include, exact exclude, suffix exclude, suffix include, neutral.
+Exact-include-first is the per-slug exception that carves one type out of a broad suffix
+rule without disabling the rule.
+
+**A disqualifier is fatal**, before the strict and name-evidence gates run. `allow_name_only`
+— set for cloud kitchen and manufacturer, where Google has no faithful type — relaxes the
+type gate but can never bypass an exclusion.
+
+**No two niches may claim the same type.** This is the structural guarantee: if type sets
+are disjoint, substitution cannot happen by type at all. It is asserted directly rather
+than inferred from the cross product.
+
+Exclusions carry a cost that is easy to miss. Because a disqualifier is fatal, two niches
+excluding each other's types leave a dual-labelled place matching *nothing*, and Google
+dual-labels precisely the businesses worth pitching — the Kerala-style Ayurveda centre, the
+caterer who also runs a banquet hall. So an exclusion is justified only when the type would
+otherwise qualify, or when its presence proves a different business rather than a related
+service the same business offers. Excluding an already-neutral type buys no precision and
+orphans every dual-labelled place.
 
 ## Scoring
 
