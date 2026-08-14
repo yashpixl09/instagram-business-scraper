@@ -586,7 +586,14 @@ def rows(pool, sql, params=None):
         return connection.execute(sql, params).fetchall()
 
 
-def add_business(pool, *, name="Blush Salon", niche="salon", city=CITY, area=AREA):
+def add_business(pool, *, name="Blush Salon", niche="salon", city=CITY, area=AREA, run_id=None):
+    """Seed a business, optionally attributed to the run that found it.
+
+    `run_id` writes the enrichment row a discovery pass would have written. It is what makes
+    the business belong to a run: `businesses` carries no run column, because a business is
+    discovered once and lives on, so a column there could only record which run found it
+    FIRST. What a run owns is the observations it paid for.
+    """
     business_id = uuid.uuid4()
     with pool.connection() as connection:
         connection.execute(
@@ -594,6 +601,12 @@ def add_business(pool, *, name="Blush Salon", niche="salon", city=CITY, area=ARE
             " VALUES (%s, %s, %s, %s, %s, %s)",
             (business_id, name, niche, city, area, "9123456789"),
         )
+        if run_id is not None:
+            connection.execute(
+                "INSERT INTO enrichments (business_id, source, status, data, run_id)"
+                " VALUES (%s, 'google_maps', 'ok', '{\"reviews\": 210}'::jsonb, %s)",
+                (business_id, run_id),
+            )
     return business_id
 
 
@@ -725,11 +738,21 @@ def test_an_unknown_run_is_a_404_in_the_envelope(live):
 @integration
 @needs_postgres
 def test_leads_default_to_the_latest_run_and_are_scoped_by_it(live, pool):
-    wanted = add_business(pool, name="Blush Salon", niche="salon")
-    other_city = add_business(pool, name="Delhi Salon", niche="salon", city="Delhi")
-    other_niche = add_business(pool, name="Third Wave", niche="cafe")
+    """A run owns the businesses it paid to discover, not everything in its scope.
 
-    live.post("/api/search", json=search_body(niches=["salon"]))
+    Attribution is through `enrichments.run_id`, the row a discovery pass writes for every
+    business it stores. So a business seeded without one belongs to no run -- which is also
+    why a second run over the same city does not re-list the first run's leads: boundary
+    dedup means it never stored them, so it never bought them.
+    """
+    started = live.post("/api/search", json=search_body(niches=["salon"])).json()
+    run_id = started["run_id"]
+
+    wanted = add_business(pool, name="Blush Salon", niche="salon", run_id=run_id)
+    other_city = add_business(pool, name="Delhi Salon", niche="salon", city="Delhi",
+                              run_id=run_id)
+    other_niche = add_business(pool, name="Third Wave", niche="cafe", run_id=run_id)
+
     payload = live.get("/api/leads").json()
 
     ids = [lead["id"] for lead in payload["leads"]]
@@ -750,8 +773,8 @@ def test_leads_default_to_the_latest_run_and_are_scoped_by_it(live, pool):
 @integration
 @needs_postgres
 def test_leads_can_be_asked_for_by_run(live, pool):
-    add_business(pool, name="Blush Salon", niche="salon")
     salons = live.post("/api/search", json=search_body(niches=["salon"])).json()
+    add_business(pool, name="Blush Salon", niche="salon", run_id=salons["run_id"])
     live.post("/api/search", json=search_body(niches=["cafe"])).json()
 
     payload = live.get("/api/leads", params={"run_id": salons["run_id"]}).json()

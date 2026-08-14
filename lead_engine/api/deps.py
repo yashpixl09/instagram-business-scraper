@@ -172,7 +172,13 @@ SELECT {_LEAD_COLUMNS}
   FROM businesses b
   LEFT JOIN lead_bands lb ON lb.business_id = b.id
   LEFT JOIN verdicts v ON v.business_id = b.id
- WHERE (%(city)s::text IS NULL OR lower(b.city) = lower(%(city)s::text))
+ WHERE (
+         %(run_id)s::uuid IS NULL
+         OR b.id IN (
+              SELECT e.business_id FROM enrichments e WHERE e.run_id = %(run_id)s::uuid
+            )
+       )
+   AND (%(city)s::text IS NULL OR lower(b.city) = lower(%(city)s::text))
    AND (%(niche_ids)s::text[] IS NULL OR b.niche_id = ANY(%(niche_ids)s::text[]))
  ORDER BY lb.total DESC NULLS LAST, b.first_seen_at, b.id
  LIMIT %(limit)s
@@ -593,11 +599,21 @@ class Engine:
     def leads(self, run_id: UUID | None = None, *, limit: int = DEFAULT_LEAD_LIMIT) -> LeadListOut:
         """Every lead in a run's scope, latest run when none is named.
 
-        `businesses` carries no run id -- a business is discovered once and re-seen by every
-        later run -- so a run's leads are the businesses inside the scope its goal declared.
-        That is the honest answer available from this schema, and it means a second run over
-        the same city and niches lists the first run's leads too, which is what an operator
-        working a city actually wants.
+        Scoped through `enrichments.run_id`, not through the goal's city and niches.
+
+        `businesses` deliberately carries no run id: a business is discovered once and lives
+        on, so a single column could only ever record which run FIRST found it. What a run
+        actually owns is the observations it paid for, and every business a pass stores gets
+        an enrichment row stamped with that run.
+
+        This is also why a second run does not re-list the first run's leads. Boundary dedup
+        means a pass only ever stores businesses the system did not already hold, so a
+        re-encountered business writes no new enrichment and belongs to the run that bought
+        it. "What did this run find" and "what have I already worked" stay different
+        questions -- which is the whole point of paying for discovery only once.
+
+        The goal's scope still applies as a second filter, so an older goal or one written by
+        something else still lists sensibly.
         """
         if run_id is None:
             run_id = self.latest_run_id()
@@ -612,6 +628,7 @@ class Engine:
         rows = self._select(
             SELECT_LEADS,
             {
+                "run_id": run_id,
                 "city": scope.get("city"),
                 "niche_ids": list(niche_ids) if niche_ids else None,
                 "limit": _bounded(limit, 1, MAX_LEAD_LIMIT),
