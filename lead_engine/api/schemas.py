@@ -60,8 +60,23 @@ MAX_AREAS = 25
 #: bigger one.
 MAX_NICHES = 24
 
-#: Operator verdicts, ported verbatim from the prototype's `OUTREACH_STATUSES`.
-VERDICTS: frozenset[str] = frozenset(
+#: The operator's judgement of a lead's POTENTIAL. Not its pipeline position.
+#:
+#: These were briefly the prototype's `OUTREACH_STATUSES` -- contacted, replied, follow_up
+#: and so on -- which conflated two orthogonal things. Where a lead sits in the pipeline and
+#: whether it is worth pursuing are different facts: a lead can be high-potential AND already
+#: contacted, and a vocabulary that cannot express both loses one of them.
+#:
+#: `my_verdict` is the half only the operator can supply. The engine bands audience size from
+#: evidence; the operator decides which of those bands is worth their afternoon. Phase 8 gates
+#: automation-pitch generation on `high` or `medium`, so with the pipeline vocabulary here that
+#: gate could never open.
+VERDICTS: frozenset[str] = frozenset({"high", "medium", "low", "skip"})
+
+#: Where a lead sits in the pipeline, and what came of it. Stored in `verdicts.outcome`,
+#: alongside `contacted_on` and `channel`, which together are the record of the approach.
+#: The prototype's list, kept whole -- it was the right vocabulary for the wrong column.
+OUTCOMES: frozenset[str] = frozenset(
     {
         "not_contacted",
         "shortlisted",
@@ -148,11 +163,18 @@ class SearchSpec(BaseModel):
 
 
 class VerdictUpdate(BaseModel):
-    """The operator's verdict on one lead. Everything but the verdict is optional."""
+    """What the operator decided about one lead, and how far the approach got.
+
+    Every field is optional because this is a PATCH: an omitted field means "leave it alone".
+    `parse_verdict_update` enforces that at least one of `my_verdict` or `outcome` is present,
+    so an empty body is still rejected -- but recording a phone call does not require
+    restating an opinion formed last week, and the upsert COALESCEs rather than assigns so it
+    cannot erase one either.
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    my_verdict: str
+    my_verdict: str | None = None
     notes: str = ""
     contacted_on: date | None = None
     channel: str | None = None
@@ -266,17 +288,27 @@ def parse_search_request(payload: object) -> SearchSpec:
 def parse_verdict_update(payload: object) -> VerdictUpdate:
     """Validate a `PATCH /api/leads/{id}/status` body.
 
-    `outreach_status` is the prototype's name for the field and is accepted as an alias, for
-    the same reason a bare city is.
+    Two independent facts, and a caller may send either or both:
+
+        my_verdict   is this lead worth pursuing -- high, medium, low, skip
+        outcome      where the approach got to -- contacted, replied, converted, ...
+
+    `outreach_status` is the prototype's field name and aliases **outcome**, not
+    `my_verdict`. It always held pipeline states; it was pointed at the wrong column when
+    this endpoint was first written, which made Phase 8's gate on `high`/`medium`
+    unreachable through the only write path there is.
+
+    Requiring both would mean an operator recording "I called them" had to restate their
+    opinion of the lead to do it, so at least one is enough.
     """
     if not isinstance(payload, dict):
         raise _problem("invalid_status", "Status update must be an object.")
 
-    verdict = payload.get("my_verdict", payload.get("outreach_status"))
-    if not isinstance(verdict, str) or verdict not in VERDICTS:
+    verdict = payload.get("my_verdict")
+    if verdict is not None and (not isinstance(verdict, str) or verdict not in VERDICTS):
         raise _problem(
             "invalid_status",
-            "my_verdict is required and must be a supported verdict.",
+            "my_verdict must be a supported verdict.",
             {"supported_verdicts": sorted(VERDICTS)},
         )
 
@@ -297,9 +329,26 @@ def parse_verdict_update(payload: object) -> VerdictUpdate:
                 "invalid_status", "contacted_on must be an ISO date (YYYY-MM-DD)."
             ) from exc
 
+    outcome = payload.get("outcome", payload.get("outreach_status"))
+    if outcome is not None and outcome not in OUTCOMES:
+        raise _problem(
+            "invalid_status",
+            "outcome must be a supported pipeline state.",
+            {"supported_outcomes": sorted(OUTCOMES)},
+        )
+
+    if verdict is None and outcome is None:
+        raise _problem(
+            "invalid_status",
+            "Send my_verdict, outcome, or both.",
+            {
+                "supported_verdicts": sorted(VERDICTS),
+                "supported_outcomes": sorted(OUTCOMES),
+            },
+        )
+
     channel = payload.get("channel")
-    outcome = payload.get("outcome")
-    for name, value in (("channel", channel), ("outcome", outcome)):
+    for name, value in (("channel", channel),):
         if value is not None and (not isinstance(value, str) or len(value) > MAX_TEXT):
             raise _problem(
                 "invalid_status", f"{name} must be a string up to {MAX_TEXT} characters."

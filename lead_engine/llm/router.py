@@ -326,45 +326,45 @@ UPDATE llm_rate_buckets
 # Half-open is entered by exactly one caller, because exactly one UPDATE can match a row in
 # state 'open' with an elapsed cooldown. Re-stamping `opened_at` is what makes it
 # self-healing: a probe whose worker died leaves the provider re-armed, not stuck.
-_ADMIT_PROBE = """
+_ADMIT_PROBE = f"""
 UPDATE llm_rate_buckets
-   SET circuit_state = '{half_open}',
+   SET circuit_state = '{HALF_OPEN}',
        opened_at = %(now)s
  WHERE provider = %(provider)s
-   AND circuit_state IN ('{open}', '{half_open}')
+   AND circuit_state IN ('{OPEN}', '{HALF_OPEN}')
    AND opened_at IS NOT NULL
    AND %(now)s::timestamptz - opened_at >= make_interval(secs => %(cooldown)s)
 RETURNING circuit_state
-""".format(open=OPEN, half_open=HALF_OPEN)
+"""
 
-_RECORD_SUCCESS = """
+_RECORD_SUCCESS = f"""
 UPDATE llm_rate_buckets
-   SET circuit_state = '{closed}',
+   SET circuit_state = '{CLOSED}',
        consecutive_failures = 0,
        opened_at = NULL
  WHERE provider = %(provider)s
-""".format(closed=CLOSED)
+"""
 
 # The CASE arms read the row's OLD values, which is what makes this one statement rather
 # than a read, a decision and a write. A failed half-open probe re-opens immediately: the
 # probe WAS the evidence, and counting to three again would send two more calls into a
 # provider that has just told us it is still down.
-_RECORD_FAILURE = """
+_RECORD_FAILURE = f"""
 UPDATE llm_rate_buckets
    SET consecutive_failures = consecutive_failures + 1,
        circuit_state = CASE
-           WHEN circuit_state = '{half_open}' THEN '{open}'
-           WHEN consecutive_failures + 1 >= %(threshold)s THEN '{open}'
+           WHEN circuit_state = '{HALF_OPEN}' THEN '{OPEN}'
+           WHEN consecutive_failures + 1 >= %(threshold)s THEN '{OPEN}'
            ELSE circuit_state
        END,
        opened_at = CASE
-           WHEN circuit_state = '{half_open}' THEN %(now)s
+           WHEN circuit_state = '{HALF_OPEN}' THEN %(now)s
            WHEN consecutive_failures + 1 >= %(threshold)s THEN %(now)s
            ELSE opened_at
        END
  WHERE provider = %(provider)s
 RETURNING circuit_state
-""".format(open=OPEN, half_open=HALF_OPEN)
+"""
 
 
 class DatabaseCircuitStore:
@@ -545,7 +545,16 @@ class LLMRouter:
         only: Iterable[str] | None = None,
         **kwargs: Any,
     ) -> LLMRouter:
-        """Build the chain from `config.Settings`, skipping every provider without a key."""
+        """Build the chain from `config.Settings`, skipping every provider without a key.
+
+        Zero configured providers is a supported deployment, not an error: the chain then
+        consists of the deterministic template alone, and a run still completes with a full
+        set of artifacts. That is the guarantee, so it must not be reachable only by accident.
+        """
+        # Imported here rather than at module scope: `providers` pulls in httpx, and the
+        # router is otherwise usable with an injected client and no HTTP stack at all.
+        from .providers import clients_from_settings
+
         clients = clients_from_settings(settings, transport=transport, only=only)
         return cls(clients, store=store, cache=cache, **kwargs)
 

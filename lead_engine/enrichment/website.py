@@ -276,7 +276,6 @@ TLD_LABELS = frozenset(
         "edu",
         "gov",
         "ac",
-        "org",
         "web",
         "page",
         "link",

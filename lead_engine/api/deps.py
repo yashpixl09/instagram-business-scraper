@@ -203,12 +203,20 @@ SELECT b.id, %(my_verdict)s, %(notes)s, %(contacted_on)s::date, %(channel)s, %(o
        now()
   FROM businesses b
  WHERE b.id = %(business_id)s
+-- COALESCE, not assignment: this is a PATCH, and an omitted field means "leave it", not
+-- "clear it". Without it, an operator recording "I called them today" would silently erase
+-- the `high` they set last week -- and Phase 8 gates automation pitches on exactly that
+-- value, so the lead would quietly stop qualifying for the second offer.
+--
+-- The cost is that a field cannot be cleared by sending null. Clearing a verdict is rare and
+-- an explicit sentinel can be added when something actually needs it; losing one silently is
+-- neither rare nor recoverable.
 ON CONFLICT (business_id) DO UPDATE
-   SET my_verdict   = excluded.my_verdict,
-       notes        = excluded.notes,
-       contacted_on = excluded.contacted_on,
-       channel      = excluded.channel,
-       outcome      = excluded.outcome,
+   SET my_verdict   = COALESCE(excluded.my_verdict, verdicts.my_verdict),
+       notes        = COALESCE(NULLIF(excluded.notes, ''), verdicts.notes),
+       contacted_on = COALESCE(excluded.contacted_on, verdicts.contacted_on),
+       channel      = COALESCE(excluded.channel, verdicts.channel),
+       outcome      = COALESCE(excluded.outcome, verdicts.outcome),
        updated_at   = now()
 RETURNING business_id
 """

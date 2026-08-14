@@ -377,7 +377,32 @@ def test_a_verdict_is_validated_against_the_supported_list(client):
     assert response.status_code == 422
     body = error(response)
     assert body["code"] == "invalid_status"
-    assert "shortlisted" in body["details"]["supported_verdicts"]
+    assert body["details"]["supported_verdicts"] == ["high", "low", "medium", "skip"]
+
+
+def test_a_verdict_is_a_potential_tier_not_a_pipeline_state(client):
+    """Two orthogonal facts, two columns.
+
+    `my_verdict` is whether the lead is worth pursuing -- the half only the operator can
+    supply, since the engine bands audience size from evidence but cannot know whose
+    afternoon is worth spending. `outcome` is where the approach got to. A lead can be
+    high-potential AND already contacted; one vocabulary for both loses whichever is asked
+    for second.
+
+    This was briefly the prototype's OUTREACH_STATUSES, which meant Phase 8's gate on
+    `high`/`medium` could never open through the only write path there is.
+    """
+    pipeline = client.patch(
+        f"/api/leads/{uuid.uuid4()}/status", json={"my_verdict": "contacted"}
+    )
+    assert pipeline.status_code == 422, "a pipeline state is not a verdict"
+
+    bad_outcome = client.patch(
+        f"/api/leads/{uuid.uuid4()}/status",
+        json={"my_verdict": "high", "outcome": "high"},
+    )
+    assert bad_outcome.status_code == 422, "a verdict is not an outcome"
+    assert "contacted" in error(bad_outcome)["details"]["supported_outcomes"]
 
 
 def test_fastapis_own_validation_uses_the_same_envelope(client):
@@ -839,33 +864,33 @@ def test_a_verdict_is_written_and_then_replaced(live, pool):
 
     first = live.patch(
         f"/api/leads/{business_id}/status",
-        json={"my_verdict": "shortlisted", "notes": "walk-in Tuesday"},
+        json={"my_verdict": "high", "notes": "walk-in Tuesday"},
     )
     assert first.status_code == 204
     assert first.content == b""
 
     lead = live.get(f"/api/leads/{business_id}").json()
-    assert lead["my_verdict"] == "shortlisted"
+    assert lead["my_verdict"] == "high"
     assert lead["notes"] == "walk-in Tuesday"
     assert lead["verdict_updated_at"] is not None
 
-    # The prototype's field name is accepted as an alias, and a second write replaces the
-    # first rather than inserting beside it.
+    # Recording the approach does not require restating the opinion. `outreach_status` is
+    # the prototype's field name and aliases `outcome` -- it always held pipeline states.
     second = live.patch(
         f"/api/leads/{business_id}/status",
         json={
             "outreach_status": "contacted",
             "contacted_on": "2026-08-13",
             "channel": "visit",
-            "outcome": "wants a call back",
         },
     )
     assert second.status_code == 204
 
     updated = live.get(f"/api/leads/{business_id}").json()
-    assert updated["my_verdict"] == "contacted"
+    assert updated["outcome"] == "contacted"
     assert updated["contacted_on"] == "2026-08-13"
     assert updated["channel"] == "visit"
+    # A second write replaces the first rather than inserting beside it.
     assert rows(pool, "SELECT count(*) FROM verdicts")[0][0] == 1
 
 
@@ -873,7 +898,7 @@ def test_a_verdict_is_written_and_then_replaced(live, pool):
 @needs_postgres
 def test_a_verdict_on_a_lead_that_does_not_exist_is_a_404(live):
     response = live.patch(
-        f"/api/leads/{uuid.uuid4()}/status", json={"my_verdict": "shortlisted"}
+        f"/api/leads/{uuid.uuid4()}/status", json={"my_verdict": "high"}
     )
 
     assert response.status_code == 404
