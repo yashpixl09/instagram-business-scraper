@@ -38,7 +38,18 @@ FORBIDDEN = {
 # is the thing this entry of FORBIDDEN exists to catch.
 ALLOWED_SUBMODULES = {"urllib.parse"}
 
-PURE = ("models.py", "dedupe.py", "scoring.py", "ranking.py", "copy.py", "niches.py")
+PURE = (
+    "models.py",
+    "dedupe.py",
+    "scoring.py",
+    "ranking.py",
+    "copy.py",
+    "niches.py",
+    # The automation catalogue. Pure for the same reason the niche registry is: what fires an
+    # opportunity is a rule, not a judgement, and a rule that cannot reach the network cannot
+    # quietly start guessing.
+    "automations.py",
+)
 
 #: Top-level modules that are deliberately NOT pure.
 #:
