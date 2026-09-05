@@ -162,6 +162,22 @@ class SearchSpec(BaseModel):
     use_ai: bool
 
 
+class EnrichSpec(BaseModel):
+    """A validated `POST /api/enrich` request.
+
+    At least one of `run_id`/`business_ids` is required -- there is otherwise nothing to
+    enrich -- and both may be given together, which is how the CLI's `--enrich` calls this
+    same path: the run names the scope, and the explicit ids are exactly what discovery just
+    found.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: UUID | None = None
+    business_ids: tuple[UUID, ...] = ()
+    use_ai: bool = True
+
+
 class VerdictUpdate(BaseModel):
     """What the operator decided about one lead, and how far the approach got.
 
@@ -283,6 +299,50 @@ def parse_search_request(payload: object) -> SearchSpec:
         raise _problem("invalid_city", str(exc)) from exc
 
     return SearchSpec(scope=scope, niche_ids=tuple(niche_ids), limit=limit, use_ai=use_ai)
+
+
+def _uuid(value: object, code: str, field: str) -> UUID:
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise _problem(code, f"{field} must be a UUID.") from exc
+
+
+def parse_enrich_request(payload: object) -> EnrichSpec:
+    """Validate a `POST /api/enrich` body. Raises `ApiProblem` and nothing else.
+
+    An empty body is not automatically rejected the way `/api/search`'s is: `{}` is a
+    legal-shaped object, and the "there is nothing to enrich" refusal is a separate check
+    below so it carries its own code rather than borrowing `invalid_request`'s generic one.
+    """
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise _problem("invalid_request", "Request body must be an object.")
+
+    raw_run_id = payload.get("run_id")
+    run_id = _uuid(raw_run_id, "invalid_run_id", "run_id") if raw_run_id is not None else None
+
+    raw_ids = payload.get("business_ids")
+    business_ids: tuple[UUID, ...] = ()
+    if raw_ids is not None:
+        if not isinstance(raw_ids, list):
+            raise _problem("invalid_business_ids", "business_ids must be an array of UUIDs.")
+        business_ids = tuple(
+            _uuid(item, "invalid_business_ids", "Each business id") for item in raw_ids
+        )
+
+    if run_id is None and not business_ids:
+        raise _problem(
+            "invalid_request",
+            "Send run_id, business_ids, or both -- there is nothing to enrich otherwise.",
+        )
+
+    use_ai = payload.get("use_ai", True)
+    if not isinstance(use_ai, bool):
+        raise _problem("invalid_use_ai", "use_ai must be a boolean.")
+
+    return EnrichSpec(run_id=run_id, business_ids=business_ids, use_ai=use_ai)
 
 
 def parse_verdict_update(payload: object) -> VerdictUpdate:
@@ -523,3 +583,21 @@ class LeadListOut(BaseModel):
     run_id: UUID
     count: int
     leads: list[LeadOut]
+
+
+class EnrichReportOut(BaseModel):
+    """What one enrichment pass did -- counts first, mirroring `RunOut`'s spirit.
+
+    `usage` is `enrichment.service.ProviderUsage.as_dict()` verbatim: how much of the pass
+    ran on the free provider versus the metered one. Firecrawl has a monthly credit pool,
+    not a per-run ledger like SearchAPI, so this is reported rather than budgeted -- see
+    `Engine.execute_enrichment`.
+    """
+
+    run_id: UUID | None = None
+    business_ids: list[UUID]
+    enriched: int
+    scored: int
+    offers_detected: int
+    outreach_written: int
+    usage: dict[str, Any]

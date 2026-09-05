@@ -21,11 +21,13 @@ from __future__ import annotations
 from dataclasses import fields
 
 from .rows import (
+    AutomationOpportunityRow,
     BusinessRow,
     ContactRow,
     EnrichmentRow,
     EventRow,
     GoalRow,
+    OutreachRow,
     RunRow,
     ScoreRow,
     TaskRow,
@@ -51,6 +53,8 @@ BUSINESS_COLUMNS = column_list(BusinessRow)
 ENRICHMENT_COLUMNS = column_list(EnrichmentRow)
 CONTACT_COLUMNS = column_list(ContactRow)
 SCORE_COLUMNS = column_list(ScoreRow)
+AUTOMATION_OPPORTUNITY_COLUMNS = column_list(AutomationOpportunityRow)
+OUTREACH_COLUMNS = column_list(OutreachRow)
 
 
 # --- the queue ---------------------------------------------------------------------------
@@ -312,4 +316,35 @@ INSERT INTO scores (business_id, scorer_version, total, demand, website_gap, bud
 VALUES (%(business_id)s, %(scorer_version)s, %(total)s, %(demand)s, %(website_gap)s,
         %(budget)s, %(reachability)s, %(signals)s, %(evidence)s, %(audience_index)s)
 RETURNING {SCORE_COLUMNS}
+"""
+
+# Upsert on `(business_id, opportunity_id)`, which is the UNIQUE constraint 0005 declares.
+# DO UPDATE rather than DO NOTHING: re-detecting an offer that already fired is the common
+# case (a business gets enriched more than once), and a caller that just repeated the
+# detection with fresher evidence wants the row to reflect the newest trigger_signals and
+# evidence, not silently keep whatever an earlier, possibly staler, pass wrote. DO NOTHING
+# would make the second detection invisible; erroring on the natural key would turn ordinary
+# re-enrichment into an exception the caller has to swallow. `detected_at` moves to `now()`
+# on a refresh so a reader can tell "still true as of the last pass" from "found once and
+# never looked at since".
+UPSERT_AUTOMATION_OPPORTUNITY = f"""
+INSERT INTO automation_opportunities (business_id, opportunity_id, confidence,
+                                      trigger_signals, evidence)
+VALUES (%(business_id)s, %(opportunity_id)s, %(confidence)s, %(trigger_signals)s,
+        %(evidence)s)
+ON CONFLICT (business_id, opportunity_id) DO UPDATE
+   SET confidence      = excluded.confidence,
+       trigger_signals = excluded.trigger_signals,
+       evidence        = excluded.evidence,
+       detected_at     = now()
+RETURNING {AUTOMATION_OPPORTUNITY_COLUMNS}
+"""
+
+# Append-only, like `INSERT_ENRICHMENT` and `INSERT_CONTACT`: a redrafted pitch is a new
+# row. Overwriting one in place would let a regeneration erase the record of prose that may
+# already have been sent to the business.
+INSERT_OUTREACH = f"""
+INSERT INTO outreach (business_id, kind, channel, body, evidence)
+VALUES (%(business_id)s, %(kind)s, %(channel)s, %(body)s, %(evidence)s)
+RETURNING {OUTREACH_COLUMNS}
 """

@@ -119,6 +119,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resolve the geography, plan the cells, print the cost, and stop.",
     )
+    parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help=(
+            "After a successful run, also enrich the businesses just found: website, "
+            "social and ad-library lookups, a re-score, automation-opportunity detection "
+            "for high/medium-verdict leads, and drafted outreach. Uses TinyFish (free, "
+            "rate-limited only); Firecrawl is used only as a fallback and meters 1,000 "
+            "credits a month -- usage is reported, not budgeted. Respects --no-ai."
+        ),
+    )
     return parser
 
 
@@ -252,6 +263,41 @@ def print_report(report: Any, remaining: int | None) -> None:
         _out(f"  budget left    : {remaining}")
 
 
+def print_enrichment_plan(count: int) -> None:
+    """The pre-flight block for `--enrich`. Printed before anything is looked up.
+
+    Unlike search there is no lifetime allowance to check against and refuse over --
+    TinyFish is free and only rate-limited, and Firecrawl's 1,000-credit pool is monthly and
+    renewing rather than a fixed budget this run could exhaust for good. So the discipline
+    here is the honest equivalent: say what is about to happen and how many businesses it
+    covers, before any of it runs, and report actual usage afterwards instead of budgeting
+    it in advance.
+    """
+    _out()
+    _out(f"Enrichment: {count} business(es) queued for website, social and ad-library lookups.")
+    _out(
+        "  TinyFish Search and Fetch are free and capped only by request rate; Firecrawl "
+        "is used only when TinyFish cannot answer, and meters 1,000 credits/month."
+    )
+
+
+def print_enrichment_report(report: Any) -> None:
+    """The `--enrich` summary block, mirroring `print_report`'s style."""
+    _out()
+    _out("Enrichment pass:")
+    _out(f"  businesses enriched : {report.enriched}")
+    _out(f"  rescored            : {report.scored}")
+    _out(f"  automation offers   : {report.offers_detected}")
+    _out(f"  outreach drafted    : {report.outreach_written}")
+    usage = report.usage or {}
+    if usage:
+        _out(
+            f"  provider usage      : {usage.get('primary_calls', 0)} free (TinyFish), "
+            f"{usage.get('fallback_calls', 0)} metered (Firecrawl), "
+            f"{usage.get('fallback_unavailable', 0)} unanswered"
+        )
+
+
 # --- the run ------------------------------------------------------------------------------
 
 
@@ -309,6 +355,22 @@ def _run(args: argparse.Namespace, spec: SearchSpec, engine: Engine) -> int:
     if not report.found:
         _out("No new businesses. Nothing here this system did not already hold.")
         return EXIT_NO_RESULTS
+
+    if args.enrich:
+        business_ids = [
+            business.business_id
+            for business in report.outcome.businesses
+            if business.business_id is not None
+        ]
+        if business_ids:
+            print_enrichment_plan(len(business_ids))
+            enrichment_report = engine.execute_enrichment(
+                run_id=report.run_id,
+                business_ids=business_ids,
+                use_ai=not args.no_ai,
+            )
+            print_enrichment_report(enrichment_report)
+
     return EXIT_OK
 
 

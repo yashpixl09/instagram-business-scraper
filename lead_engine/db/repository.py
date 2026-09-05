@@ -52,11 +52,13 @@ from psycopg_pool import ConnectionPool
 
 from . import queries
 from .rows import (
+    AutomationOpportunityRow,
     BusinessRow,
     ContactRow,
     EnrichmentRow,
     EventRow,
     GoalRow,
+    OutreachRow,
     RunRow,
     ScoreRow,
     TaskRow,
@@ -497,4 +499,55 @@ class Repository:
                 "audience_index": audience_index,
             },
             ScoreRow,
+        )
+
+    def insert_automation_opportunity(
+        self,
+        business_id: uuid.UUID,
+        opportunity_id: str,
+        *,
+        confidence: float,
+        trigger_signals: list[Any],
+        evidence: dict[str, Any],
+    ) -> AutomationOpportunityRow:
+        """Record one firing automation offer.
+
+        Idempotent on `(business_id, opportunity_id)`: re-detecting the same offer on a
+        later pass refreshes `confidence`, `trigger_signals`, `evidence` and `detected_at`
+        rather than raising or duplicating -- see `queries.UPSERT_AUTOMATION_OPPORTUNITY`.
+        """
+        return self._one(
+            queries.UPSERT_AUTOMATION_OPPORTUNITY,
+            {
+                "business_id": business_id,
+                "opportunity_id": opportunity_id,
+                "confidence": confidence,
+                "trigger_signals": Jsonb(list(trigger_signals)),
+                "evidence": Jsonb(evidence),
+            },
+            AutomationOpportunityRow,
+        )
+
+    def insert_outreach(
+        self,
+        business_id: uuid.UUID,
+        kind: str,
+        channel: str,
+        body: str,
+        *,
+        evidence: dict[str, Any] | None = None,
+    ) -> OutreachRow:
+        """Record one piece of generated outreach. Append-only, like `insert_enrichment`:
+        a regenerated pitch is a new row, never an overwrite of one that may already have
+        been sent."""
+        return self._one(
+            queries.INSERT_OUTREACH,
+            {
+                "business_id": business_id,
+                "kind": kind,
+                "channel": channel,
+                "body": body,
+                "evidence": Jsonb(evidence or {}),
+            },
+            OutreachRow,
         )

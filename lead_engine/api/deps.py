@@ -54,7 +54,9 @@ from fastapi import Request
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from ..automations import AutomationOffer, firing_offers
 from ..config import SEARCHAPI, Settings
+from ..copy import build_fallback_outreach, build_prompt
 from ..db.repository import Repository
 from ..discovery.cells import BREADTH_FIRST, CellPolicy, SearchCellStore
 from ..discovery.service import (
@@ -66,6 +68,19 @@ from ..discovery.service import (
     RepositoryBusinesses,
 )
 from ..discovery.status import NicheStatusStore
+from ..enrichment import ads as ads_module
+from ..enrichment import website as website_module
+from ..enrichment.cache import InMemoryCache, PostgresCache
+from ..enrichment.service import (
+    SOURCE_ADS,
+    SOURCE_FIRECRAWL_WEB,
+    SOURCE_TINYFISH_WEB,
+    BusinessEnrichment,
+    EnrichmentRequest,
+    EnrichmentService,
+    EvidenceStore,
+    WebProvider,
+)
 from ..export import excel
 from ..geo.resolver import (
     CachingResolver,
@@ -75,17 +90,21 @@ from ..geo.resolver import (
     resolve_scope,
 )
 from ..geo.scope import GeoScope, ResolvedLocation, normalize
-from ..models import Evidence
+from ..llm.cache import ResponseCache
+from ..llm.router import DatabaseCircuitStore, LLMRouter
+from ..models import Evidence, Lead
 from ..niches import NICHE_PROFILES, niche_payload
 from ..providers.budget import BudgetNotConfigured, SearchBudget, fingerprint
 from ..providers.fixtures import FixtureMapsProvider
 from ..providers.searchapi import SearchApiClient
+from ..providers.tinyfish import TinyFishClient
 from ..scoring import audience_index, score_lead
 from .schemas import (
     DEFAULT_VERIFICATION,
     ApiProblem,
     BudgetOut,
     ConfigStatusOut,
+    EnrichSpec,
     LeadListOut,
     LeadOut,
     NicheListOut,
@@ -223,8 +242,58 @@ RETURNING business_id
 
 SELECT_NICHE_STATES = "SELECT niche_id, state FROM niche_status"
 
+# What `Engine.execute_enrichment` needs about each business it is asked to enrich: enough
+# of `businesses` to rebuild a `Lead`, the operator's verdict (the automation gate), and the
+# reviews/rating Google handed over at discovery -- which live in `enrichments`, not on
+# `businesses` or `scores`, and would otherwise be lost the moment a later pass re-scores.
+#
+# Scoped exactly like `SELECT_LEADS`: a NULL `run_id` means "ignore this filter", so a
+# caller naming only `business_ids` still gets rows, and one naming only `run_id` gets
+# every business that run's discovery pass actually stored an enrichment row for.
+SELECT_ENRICHMENT_TARGETS = """
+WITH latest_google AS (
+    -- `DISTINCT ON` picks the freshest sighting, same rule `lead_bands` (0009) uses for
+    -- the same table -- a business seen in March and again in August should be scored on
+    -- August's numbers, not averaged or arbitrarily chosen.
+    SELECT DISTINCT ON (e.business_id)
+           e.business_id, e.data
+      FROM enrichments e
+     WHERE e.source = 'google_maps'
+     ORDER BY e.business_id, e.fetched_at DESC, e.id DESC
+)
+SELECT b.id, b.place_id, b.name, b.niche_id, b.country, b.state, b.city, b.address,
+       b.lat, b.lng, b.phone, b.email, b.website, b.instagram_handle, b.facebook_url,
+       v.my_verdict,
+       coalesce(lg.data, '{}'::jsonb) AS google_evidence
+  FROM businesses b
+  LEFT JOIN verdicts v ON v.business_id = b.id
+  LEFT JOIN latest_google lg ON lg.business_id = b.id
+ WHERE (
+         %(run_id)s::uuid IS NULL
+         OR b.id IN (
+              SELECT e.business_id FROM enrichments e WHERE e.run_id = %(run_id)s::uuid
+            )
+       )
+   AND (%(business_ids)s::uuid[] IS NULL OR b.id = ANY(%(business_ids)s::uuid[]))
+ ORDER BY b.first_seen_at, b.id
+"""
+
 
 # --- what a pass produced -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EnrichmentReport:
+    """What one enrichment pass did. Mirrors `RunReport`'s spirit: counts the CLI prints
+    and an API response returns, not the findings themselves -- those are already durable,
+    in `enrichments`, `scores`, `automation_opportunities` and `outreach`."""
+
+    business_ids: tuple[UUID, ...]
+    enriched: int
+    scored: int
+    offers_detected: int
+    outreach_written: int
+    usage: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -240,6 +309,99 @@ class RunReport:
     @property
     def found(self) -> int:
         return len(self.outcome.businesses)
+
+
+# --- the enrichment pass ----------------------------------------------------------------
+
+#: The name `_score` never uses -- "google-only" says the discovery pass wrote it, and this
+#: says an enrichment pass did, so `lead_bands` and any operator reading `scores` can tell
+#: which claims came from a paid-listing snapshot and which came from actually looking at
+#: the business's own site, ads and social presence.
+ENRICHED_SCORER_VERSION = "enriched"
+
+#: The verdict gate on automation-opportunity detection and the automation pitch, stated in
+#: `automations.py`'s own docstring: the pitch is expensive to generate and worthless before
+#: the operator has judged the lead worth pursuing. `website_pitch` carries no such gate --
+#: it is the first offer, made to every enriched business regardless of verdict.
+AUTOMATION_ELIGIBLE_VERDICTS = frozenset({"high", "medium"})
+
+#: `AutomationOffer` carries no confidence of its own, and detection is not a partial-credit
+#: process: `firing_offers` (via `offer_fires`/`missing_signals`) requires every one of an
+#: offer's `required_signals` to be observed, with no loose or partial match. There is
+#: therefore no fractional number to report -- an offer either fired on complete evidence or
+#: it is not recorded at all -- so every firing offer is written at full confidence. This is
+#: a stated choice, not a measurement: it says "every required signal was actually observed"
+#: and nothing more.
+AUTOMATION_OFFER_CONFIDENCE = 1.0
+
+#: `outreach.channel` is NOT NULL and this phase does not yet choose one per business -- that
+#: is a later decision (which contact method is on file, which the operator prefers). Email
+#: is the least intrusive default for drafted prose nobody has approved to send yet.
+DEFAULT_OUTREACH_CHANNEL = "email"
+
+WEBSITE_PITCH = "website_pitch"
+AUTOMATION_PITCH = "automation_pitch"
+
+
+class _RecordingEvidenceStore:
+    """Wraps a `Repository` and remembers which `enrichments` row backs which source.
+
+    `EnrichmentService` writes through `EvidenceStore` and returns only counts -- see its
+    own docstring on why: enrichment and scoring are its whole job, and reconciling
+    observations into a different table's evidence is a decision for whatever reads them
+    later. This wrapper is that later reader's seam: `automation_opportunities.evidence` and
+    `outreach.evidence` are both required to name the row a claim traces back to, per
+    `migrations/0005_automation.sql`'s own comment, and the only way to learn a row's id
+    without changing `EnrichmentService` is to intercept the write it already makes.
+
+    Never constructed with more than one business's writes interleaved in a way that would
+    confuse it: `EnrichmentService.enrich()` writes at most one row per source per business
+    per call, so `rows_by_business[business_id][source]` is never overwritten by anything
+    but a genuine repeat for the same business, which does not happen within one pass.
+    """
+
+    def __init__(self, repository: Repository) -> None:
+        self._repository = repository
+        self.rows_by_business: dict[UUID, dict[str, int]] = {}
+
+    def insert_enrichment(
+        self,
+        business_id: UUID,
+        source: str,
+        status: str,
+        data: dict[str, Any],
+        *,
+        source_url: str | None = None,
+        run_id: UUID | None = None,
+    ) -> Any:
+        row = self._repository.insert_enrichment(
+            business_id, source, status, data, source_url=source_url, run_id=run_id
+        )
+        self.rows_by_business.setdefault(business_id, {})[source] = row.id
+        return row
+
+    def insert_contact(
+        self,
+        business_id: UUID,
+        name: str,
+        source: str,
+        *,
+        role: str = "unknown",
+        phone: str | None = None,
+        email: str | None = None,
+        source_url: str | None = None,
+        confidence: float = 0.5,
+    ) -> Any:
+        return self._repository.insert_contact(
+            business_id,
+            name,
+            source,
+            role=role,
+            phone=phone,
+            email=email,
+            source_url=source_url,
+            confidence=confidence,
+        )
 
 
 # --- the service layer ----------------------------------------------------------------
@@ -265,6 +427,9 @@ class Engine:
         policy: CellPolicy = BREADTH_FIRST,
         owns_pool: bool = False,
         clock: Callable[[], datetime] = utc_now,
+        enrichment_provider: WebProvider | None = None,
+        enrichment_fallback: WebProvider | None = None,
+        llm_router: LLMRouter | None = None,
     ) -> None:
         self.settings = settings
         self.policy = policy
@@ -275,6 +440,9 @@ class Engine:
         self._budget = budget
         self._clock = clock
         self._base_resolver: LocationResolver | None = resolver
+        self._enrichment_provider = enrichment_provider
+        self._enrichment_fallback = enrichment_fallback
+        self._llm_router = llm_router
         self.repository: Repository | None = Repository(pool) if pool is not None else None
 
     # -- lifecycle ---------------------------------------------------------------------
@@ -784,6 +952,252 @@ class Engine:
         with self.require_pool().connection() as conn:
             return excel.export(conn, target)
 
+    # -- enrichment ----------------------------------------------------------------------
+
+    def enrichment_configured(self) -> bool:
+        """Whether an enrichment pass could look anything up at all.
+
+        Duck-typed on `api_key`, same as `maps_configured()` -- an injected fake provider
+        (a fixture, a test double) is always "configured", because the point of injecting
+        one is to run the pipeline without a real key.
+        """
+        if self._enrichment_provider is not None:
+            return bool(getattr(self._enrichment_provider, "api_key", None))
+        return self.settings.tinyfish_key_value is not None
+
+    def enrichment_provider(self) -> WebProvider:
+        """The primary web provider an enrichment pass searches and fetches through.
+
+        Unlike `maps_provider()`, this never raises for a missing key: TinyFish's own
+        `search`/`fetch` calls raise `ProviderError` on a real 401, and
+        `EnrichmentService._attempt` already turns that into a `blocked`/`error` row per
+        business rather than aborting the pass -- refusing up front here would only turn a
+        graceful per-business degradation into a hard stop for the whole run.
+        """
+        if self._enrichment_provider is not None:
+            return self._enrichment_provider
+        self._enrichment_provider = TinyFishClient(self.settings.tinyfish_key_value)
+        return self._enrichment_provider
+
+    def enrichment_service(self, *, store: EvidenceStore) -> EnrichmentService:
+        """A freshly wired `EnrichmentService` for one pass.
+
+        `fallback` stays whatever was injected (usually None): this codebase has no
+        Firecrawl client yet, so there is nothing to build here even though
+        `FIRECRAWL_API_KEY` is a recognised setting -- `EnrichmentService` already treats a
+        missing fallback as a supported configuration (`fallback_unavailable`, not a crash).
+
+        The cache is `PostgresCache` when a database is configured -- the durable negative
+        cache `enrich_many` is documented to respect -- and an in-memory one otherwise, the
+        same "no database is still a supported configuration" rule `resolver()` follows.
+        """
+        cache = PostgresCache(self.connect) if self._pool is not None else InMemoryCache()
+        return EnrichmentService(
+            self.enrichment_provider(),
+            fallback=self._enrichment_fallback,
+            store=store,
+            cache=cache,
+            clock=self._clock,
+        )
+
+    def llm_router(self) -> LLMRouter:
+        """The provider chain outreach prose is generated over.
+
+        `LLMRouter.from_settings` already skips every provider without a key and still
+        returns a router -- zero configured providers is the supported "template only"
+        configuration, not an error, so there is nothing to gate here the way
+        `maps_provider()` gates a missing SearchAPI key.
+
+        Circuit state and the response cache are Postgres-backed when a database is
+        configured, for the reason `router.py`'s own module docstring gives: an in-memory
+        breaker resets on every restart, and a persisted cache is what stops a retried
+        request re-billing a provider for a prompt it already answered.
+        """
+        if self._llm_router is not None:
+            return self._llm_router
+        store = DatabaseCircuitStore(self.connect) if self._pool is not None else None
+        cache = ResponseCache(self.connect) if self._pool is not None else None
+        self._llm_router = LLMRouter.from_settings(self.settings, store=store, cache=cache)
+        return self._llm_router
+
+    def _enrichment_targets(
+        self, *, run_id: UUID | None, business_ids: Sequence[UUID] | None
+    ) -> list[dict[str, Any]]:
+        """Everything `execute_enrichment` needs about the businesses it was asked for.
+
+        A protected method rather than inlined SQL in `execute_enrichment`, so a test can
+        override it on a subclass -- exactly how `tests/test_cli.py`'s `BrokenEngine`
+        overrides `execute_run` -- and exercise the orchestration below without a database.
+        """
+        if run_id is None and not business_ids:
+            raise ApiProblem(
+                422,
+                "invalid_request",
+                "execute_enrichment needs a run_id, business_ids, or both.",
+            )
+        return self._select(
+            SELECT_ENRICHMENT_TARGETS,
+            {
+                "run_id": run_id,
+                "business_ids": list(business_ids) if business_ids else None,
+            },
+        )
+
+    def execute_enrichment(
+        self,
+        *,
+        run_id: UUID | None = None,
+        business_ids: Sequence[UUID] | None = None,
+        use_ai: bool = True,
+        channel: str = DEFAULT_OUTREACH_CHANNEL,
+    ) -> EnrichmentReport:
+        """Enrich, re-score, detect automation opportunities, and draft outreach.
+
+        The chain this assembles -- already individually proven, per the phase's own
+        design note -- is: `EnrichmentService.enrich_many` over the named businesses ->
+        `score_lead` on what it found, written as a `scores` row versioned `"enriched"` ->
+        `firing_offers(niche_id, breakdown.signals | enrichment_signals)` for every
+        `high`/`medium`-verdict business -> one `automation_opportunities` row per firing
+        offer -> `outreach` prose over a `website_pitch` for every enriched business and an
+        `automation_pitch` for every firing offer.
+
+        WHAT THIS PASS CAN HONESTLY CLAIM
+        ----------------------------------
+        `automations.ENRICHMENT_SIGNALS` names five signals this pass never asserts:
+        "high review count", "owner replies absent", "active social presence",
+        "instagram-only catalogue" and "dm ordering". None of them are observable from what
+        `EnrichmentService` gathers today -- follower counts, engagement and post content
+        belong to the Instagram *browser* stage (`enrichment/social.py`'s own docstring
+        says so: only the handle is stored here), and nothing anywhere reads review
+        replies. Rather than approximate them, `_translate_enrichment_signals` simply never
+        claims them, which means `order_intake`, `catalog_whatsapp` and `review_response`
+        can never fire from this pass alone. That is the honest answer -- no data, no claim,
+        no offer -- not a bug; a later pass with browser-sourced evidence can extend the
+        translation without touching this method's contract.
+
+        Never raises for a business the enrichment or LLM step could not fully answer:
+        `EnrichmentService` degrades per-question to `blocked`/`error` rows rather than
+        raising, and `LLMRouter.generate` is guaranteed to return text -- cache, a live
+        model, or the deterministic fallback -- never an exception for a provider failure.
+        So a business with no new evidence this pass still gets re-scored and pitched from
+        whatever it already has on file.
+        """
+        repository = self.require_repository()
+        targets = self._enrichment_targets(run_id=run_id, business_ids=business_ids)
+        if not targets:
+            return EnrichmentReport(
+                business_ids=(), enriched=0, scored=0, offers_detected=0,
+                outreach_written=0, usage={},
+            )
+
+        store = _RecordingEvidenceStore(repository)
+        service = self.enrichment_service(store=store)
+        router = self.llm_router() if use_ai else None
+
+        requests = [
+            EnrichmentRequest(
+                business_id=row["id"],
+                name=row["name"],
+                city=row["city"],
+                listed_website=row["website"],
+                listed_handle=row["instagram_handle"],
+                country=row["country"] or ads_module.DEFAULT_COUNTRY,
+                run_id=run_id,
+            )
+            for row in targets
+        ]
+        summary = service.enrich_many(requests)
+
+        scored = 0
+        offers_detected = 0
+        outreach_written = 0
+        done: list[UUID] = []
+
+        for row, enrichment in zip(targets, summary.businesses, strict=True):
+            business_id = row["id"]
+            done.append(business_id)
+            row_ids = store.rows_by_business.get(business_id, {})
+
+            profile = NICHE_PROFILES.get(row["niche_id"])
+            lead = _lead_from_row(row, enrichment)
+            breakdown = score_lead(lead, [profile] if profile else None)
+            evidence = _rescored_evidence(row, enrichment)
+            index = audience_index(evidence)
+            enrichment_signals, signal_evidence = _translate_enrichment_signals(
+                enrichment, row_ids
+            )
+            observed = set(breakdown.signals) | enrichment_signals
+
+            repository.insert_score(
+                business_id,
+                ENRICHED_SCORER_VERSION,
+                total=breakdown.total,
+                demand=breakdown.demand,
+                website_gap=breakdown.website_gap,
+                budget=breakdown.budget,
+                reachability=breakdown.reachability,
+                signals=list(breakdown.signals),
+                evidence={
+                    "pitch_angle": breakdown.pitch_angle,
+                    "run_id": str(run_id) if run_id else None,
+                },
+                audience_index=index,
+            )
+            scored += 1
+
+            website_body = _generate_website_pitch(router, lead, breakdown, profile)
+            repository.insert_outreach(
+                business_id,
+                WEBSITE_PITCH,
+                channel,
+                website_body,
+                evidence={"signals": list(breakdown.signals)},
+            )
+            outreach_written += 1
+
+            if row["my_verdict"] in AUTOMATION_ELIGIBLE_VERDICTS:
+                for offer in firing_offers(row["niche_id"], observed):
+                    trigger_signals = list(offer.required_signals)
+                    evidence_ids = sorted(
+                        {
+                            enrichment_id
+                            for signal in trigger_signals
+                            for enrichment_id in signal_evidence.get(signal, ())
+                        }
+                    )
+                    repository.insert_automation_opportunity(
+                        business_id,
+                        offer.id,
+                        confidence=AUTOMATION_OFFER_CONFIDENCE,
+                        trigger_signals=trigger_signals,
+                        evidence={"enrichment_ids": evidence_ids},
+                    )
+                    offers_detected += 1
+
+                    automation_body = _generate_automation_pitch(
+                        router, row["name"], offer, trigger_signals
+                    )
+                    repository.insert_outreach(
+                        business_id,
+                        AUTOMATION_PITCH,
+                        channel,
+                        automation_body,
+                        evidence={
+                            "opportunity_id": offer.id,
+                            "trigger_signals": trigger_signals,
+                        },
+                    )
+                    outreach_written += 1
+
+        return EnrichmentReport(
+            business_ids=tuple(done),
+            enriched=len(summary.businesses),
+            scored=scored,
+            offers_detected=offers_detected,
+            outreach_written=outreach_written,
+            usage=summary.usage.as_dict(),
+        )
+
 
 # --- construction ---------------------------------------------------------------------
 
@@ -905,6 +1319,182 @@ def _task_payload(
         "use_ai": spec.use_ai,
         "policy": policy.name,
     }
+
+
+# --- enrichment helpers ------------------------------------------------------------------
+
+
+def _lead_from_row(row: dict[str, Any], enrichment: BusinessEnrichment) -> Lead:
+    """Rebuild the `Lead` `score_lead` wants from a stored business plus this pass's finding.
+
+    `businesses` carries no `category`/`raw_categories` -- those are provider fields never
+    persisted past discovery's scoring pass -- so they are supplied empty here rather than
+    guessed. The only effect is that the "detailed business listing" bonus signal, which
+    reads `len(raw_categories) > 1`, cannot fire on a re-score; every other signal is
+    unaffected because an explicit `profile` (from `niche_id`) is always passed to
+    `score_lead`, so nothing here depends on `category` to resolve one.
+    """
+    niche_id = row["niche_id"]
+    return Lead(
+        name=row["name"],
+        category=niche_id or "",
+        address=row["address"] or "",
+        city=row["city"],
+        latitude=row["lat"],
+        longitude=row["lng"],
+        phone=row["phone"],
+        website=_effective_website(row, enrichment.website),
+        source_url=None,
+        raw_categories=[],
+        provider_id=row["place_id"],
+        matched_niches=[niche_id] if niche_id else [],
+    )
+
+
+def _effective_website(row: dict[str, Any], website: Any) -> str | None:
+    """The website `score_lead` should see: what this pass confirmed, or the discovery
+    listing when this pass could not tell.
+
+    `website.told` is False exactly when the verdict is `unknown` -- the search never ran,
+    or came back refused -- and reporting that as "no website" would claim ground this pass
+    never actually covered.
+    """
+    if website is None or not website.told:
+        return row["website"]
+    if website.verdict == website_module.NO_SITE:
+        return None
+    return website.url or row["website"]
+
+
+def _rescored_evidence(row: dict[str, Any], enrichment: BusinessEnrichment) -> Evidence:
+    """Audience evidence for `audience_index`, carried forward across a rescore.
+
+    `reviews`/`rating` are never re-fetched here -- they are Google's, bought once at
+    discovery -- so they come from the `google_maps` enrichment row `_enrichment_targets`
+    already read back. Without this, an enrichment pass would silently regress a business's
+    audience index to "unknown" the moment it was rescored, purely because this pass does
+    not itself ask Google anything.
+    """
+    google = row.get("google_evidence") or {}
+    ads = enrichment.ads
+    return Evidence(
+        reviews=google.get("reviews"),
+        rating=google.get("rating"),
+        runs_ads=ads.runs_ads if ads is not None else None,
+    )
+
+
+def _translate_enrichment_signals(
+    enrichment: BusinessEnrichment, row_ids: dict[str, int]
+) -> tuple[set[str], dict[str, list[int]]]:
+    """What `automations.ENRICHMENT_SIGNALS` this pass can honestly assert, and which
+    `enrichments` row backs each one.
+
+    This is deliberately a partial translation. `SiteGrade` (`enrichment/website.py`) grades
+    one boolean each for `catalogue`, `enquiry` and `ordering` -- it cannot distinguish "no
+    way to book an appointment" from "no way to submit a general enquiry" from "no
+    structured intake of any kind". All three catalogue tokens for that family --
+    "no booking link", "no enquiry form", "manual enquiry flow" -- are therefore asserted
+    together from the single `enquiry` gap: they describe the same observed fact, and the
+    niche gate in `automations.py` (appointment offers only reach appointment-driven niches,
+    quotation offers only reach quote-driven ones) is what stops that from over-claiming,
+    since no business's niche is gated by more than one of those families at once.
+
+    Five more vocabulary entries are never asserted here at all: "high review count",
+    "owner replies absent", "active social presence", "instagram-only catalogue" and
+    "dm ordering". Nothing this codebase runs today measures review replies, follower
+    counts, engagement or post content -- see `execute_enrichment`'s docstring for why that
+    is a phase boundary, not an oversight.
+    """
+    signals: set[str] = set()
+    evidence: dict[str, list[int]] = {}
+
+    def claim(signal: str, row_id: int | None) -> None:
+        if row_id is None:
+            return
+        signals.add(signal)
+        evidence.setdefault(signal, []).append(row_id)
+
+    website = enrichment.website
+    web_id = row_ids.get(SOURCE_TINYFISH_WEB, row_ids.get(SOURCE_FIRECRAWL_WEB))
+    if website is not None and web_id is not None:
+        if website.verdict in (website_module.NO_SITE, website_module.SOCIAL_ONLY):
+            claim("no landing page", web_id)
+        grade = website.grade
+        if grade is not None:
+            if "ordering" in grade.gaps:
+                claim("no online ordering", web_id)
+            if "enquiry" in grade.gaps:
+                claim("no booking link", web_id)
+                claim("no enquiry form", web_id)
+                claim("manual enquiry flow", web_id)
+            if "catalogue" in grade.gaps and "enquiry" in grade.gaps:
+                claim("no landing page", web_id)
+
+    ads = enrichment.ads
+    if ads is not None and ads.runs_ads:
+        claim("runs meta ads", row_ids.get(SOURCE_ADS))
+
+    return signals, evidence
+
+
+def _automation_prompt(business_name: str, offer: AutomationOffer, signals: Sequence[str]) -> str:
+    """The LLM prompt for expanding one automation offer's baseline pitch.
+
+    `copy.py` has no automation-pitch prompt of its own -- it is scoped to the website
+    pitch -- so this is written here, grounded exactly the way `copy.build_prompt` grounds
+    the website one: name the business, the offer, the observed evidence and the baseline
+    pitch, and repeat the project's non-negotiable rule verbatim.
+    """
+    return (
+        "You are writing a short outreach message pitching one workflow automation to a "
+        "local business, grounded only in evidence already observed about it.\n\n"
+        f"Business: {business_name}\n"
+        f"Automation offered: {offer.label}\n"
+        f"Observed evidence: {', '.join(signals)}\n"
+        f"Baseline pitch: {offer.pitch_line}\n\n"
+        "Expand the baseline pitch into a warm, concise outreach message of three to four "
+        "sentences. Do not invent reviews, followers, revenue, demand, or any fact not "
+        "shown above.\n"
+    )
+
+
+def _generate_website_pitch(
+    router: LLMRouter | None,
+    lead: Lead,
+    breakdown: Any,
+    profile: Any,
+) -> str:
+    """The `website_pitch` body: `copy.build_fallback_outreach` verbatim without AI, or an
+    LLM's expansion of `copy.build_prompt` with that same text as the guaranteed fallback.
+
+    `build_fallback_outreach` -- not `build_fallback_summary` -- is the fallback, because it
+    is the one function in `copy.py` actually shaped as a message to the business
+    (`export/view.py` confirms this: `outreach_message` is what fills `website_pitch`).
+    `build_fallback_summary` is read but not called here; nothing in this schema has a place
+    to put a second, summary-shaped text yet.
+    """
+    profiles = [profile] if profile else None
+    fallback = build_fallback_outreach(lead, breakdown, profiles)
+    if router is None:
+        return fallback
+    prompt = build_prompt(lead, breakdown, profiles)
+    return router.generate(prompt, fallback).text
+
+
+def _generate_automation_pitch(
+    router: LLMRouter | None,
+    business_name: str,
+    offer: AutomationOffer,
+    signals: Sequence[str],
+) -> str:
+    """The `automation_pitch` body: the offer's own `pitch_line` without AI, or an LLM's
+    expansion of it, grounded in exactly the signals that fired it."""
+    fallback = offer.pitch_line
+    if router is None:
+        return fallback
+    prompt = _automation_prompt(business_name, offer, signals)
+    return router.generate(prompt, fallback).text
 
 
 # --- FastAPI dependencies ----------------------------------------------------------------

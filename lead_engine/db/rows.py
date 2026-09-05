@@ -154,6 +154,41 @@ class ContactRow:
 
 
 @dataclass(frozen=True)
+class AutomationOpportunityRow:
+    """A row of `automation_opportunities` (0005) -- one firing offer for one business.
+
+    Unique on `(business_id, opportunity_id)`, so re-detecting the same offer on a later
+    enrichment pass is a refresh of this row, not a second one -- see
+    `queries.UPSERT_AUTOMATION_OPPORTUNITY`.
+    """
+
+    id: int
+    business_id: UUID
+    opportunity_id: str
+    confidence: float
+    trigger_signals: Json
+    evidence: Json
+    detected_at: datetime
+
+
+@dataclass(frozen=True)
+class OutreachRow:
+    """A row of `outreach` (0003) -- one piece of generated pitch prose.
+
+    Append-only, like `EnrichmentRow`: a regenerated pitch is a new row, never an overwrite
+    of text that may already have been sent to the business.
+    """
+
+    id: int
+    business_id: UUID
+    kind: str
+    channel: str
+    body: str
+    evidence: Json
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class ScoreRow:
     """A row of `scores`.
 

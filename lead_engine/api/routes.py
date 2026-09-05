@@ -30,6 +30,7 @@ from .deps import DEFAULT_LEAD_LIMIT, DEFAULT_RUN_LIMIT, MAX_LEAD_LIMIT, MAX_RUN
 from .deps import get_engine as _get_engine
 from .schemas import (
     ConfigStatusOut,
+    EnrichReportOut,
     HealthOut,
     LeadListOut,
     LeadOut,
@@ -38,6 +39,7 @@ from .schemas import (
     RunOut,
     SearchAcceptedOut,
     SearchPlanOut,
+    parse_enrich_request,
     parse_search_request,
     parse_verdict_update,
 )
@@ -131,6 +133,31 @@ def list_leads(
 @router.get("/api/leads/{lead_id}", response_model=LeadOut, tags=["leads"])
 def get_lead(engine: EngineDep, lead_id: UUID) -> LeadOut:
     return engine.lead(lead_id)
+
+
+@router.post("/api/enrich", response_model=EnrichReportOut, tags=["enrichment"])
+def enrich(engine: EngineDep, payload: Annotated[Any, Body()] = None) -> EnrichReportOut:
+    """Enrich, re-score, detect automation opportunities, and draft outreach -- inline.
+
+    Unlike `POST /api/search`, this is not enqueued for a worker: TinyFish is free and
+    capped only by request rate, Firecrawl is a monthly credit pool this call merely draws
+    from and reports usage on rather than a non-renewing allowance, and the LLM call for a
+    prompt already answered is served back out of `llm_calls` rather than re-billed. None of
+    that is the one-shot, unrecoverable spend `execute_run` is kept off this layer for.
+    """
+    spec = parse_enrich_request(payload)
+    report = engine.execute_enrichment(
+        run_id=spec.run_id, business_ids=spec.business_ids or None, use_ai=spec.use_ai
+    )
+    return EnrichReportOut(
+        run_id=spec.run_id,
+        business_ids=list(report.business_ids),
+        enriched=report.enriched,
+        scored=report.scored,
+        offers_detected=report.offers_detected,
+        outreach_written=report.outreach_written,
+        usage=report.usage,
+    )
 
 
 @router.patch("/api/leads/{lead_id}/status", status_code=204, tags=["leads"])
