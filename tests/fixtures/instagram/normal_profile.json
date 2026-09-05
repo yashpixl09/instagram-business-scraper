@@ -1,0 +1,17 @@
+{
+  "data": {
+    "user": {
+      "username": "sweetcornerbakery",
+      "full_name": "Sweet Corner Bakery",
+      "biography": "Fresh bakes daily | DM to order | Koramangala, Bengaluru",
+      "external_url": "https://sweetcornerbakery.in",
+      "category_name": "Bakery",
+      "is_private": false,
+      "is_verified": false,
+      "edge_followed_by": {"count": 18420},
+      "edge_follow": {"count": 312},
+      "edge_owner_to_timeline_media": {"count": 640}
+    }
+  },
+  "status": "ok"
+}

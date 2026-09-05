@@ -25,12 +25,15 @@ from .runner import Handler, TaskQueue, Worker
 
 if TYPE_CHECKING:  # pragma: no cover
     from .discover import DiscoverHandler, build_discover_handler
+    from .instagram import InstagramProfileLookup
 
 _DISCOVER_NAMES = {"DiscoverHandler", "build_discover_handler"}
+_INSTAGRAM_NAMES = {"InstagramProfileLookup"}
 
 __all__ = [
     "DiscoverHandler",
     "Handler",
+    "InstagramProfileLookup",
     "TaskQueue",
     "Worker",
     "build_discover_handler",
@@ -42,4 +45,8 @@ def __getattr__(name: str):
         from . import discover
 
         return getattr(discover, name)
+    if name in _INSTAGRAM_NAMES:
+        from . import instagram
+
+        return getattr(instagram, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

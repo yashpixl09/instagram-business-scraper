@@ -1,0 +1,15 @@
+{
+  "data": {
+    "user": {
+      "username": "emptybio",
+      "biography": "",
+      "external_url": "https://example.com",
+      "category_name": "Retail",
+      "is_private": false,
+      "edge_followed_by": {"count": 500},
+      "edge_follow": {"count": 50},
+      "edge_owner_to_timeline_media": {"count": 12}
+    }
+  },
+  "status": "ok"
+}

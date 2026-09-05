@@ -1,0 +1,16 @@
+{
+  "data": {
+    "user": {
+      "username": "privatehandle",
+      "full_name": "Private Handle",
+      "biography": "",
+      "external_url": null,
+      "category_name": null,
+      "is_private": true,
+      "is_verified": false,
+      "edge_followed_by": {"count": 245},
+      "edge_follow": {"count": 180}
+    }
+  },
+  "status": "ok"
+}

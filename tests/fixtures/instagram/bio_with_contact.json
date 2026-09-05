@@ -1,0 +1,15 @@
+{
+  "data": {
+    "user": {
+      "username": "contactbio",
+      "biography": "Call us at 98765 43210 or email hello@example.com to order",
+      "external_url": null,
+      "category_name": "Cafe",
+      "is_private": false,
+      "edge_followed_by": {"count": 900},
+      "edge_follow": {"count": 200},
+      "edge_owner_to_timeline_media": {"count": 45}
+    }
+  },
+  "status": "ok"
+}
