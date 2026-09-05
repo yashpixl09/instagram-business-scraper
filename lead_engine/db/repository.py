@@ -51,7 +51,16 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from . import queries
-from .rows import BusinessRow, EnrichmentRow, EventRow, GoalRow, RunRow, ScoreRow, TaskRow
+from .rows import (
+    BusinessRow,
+    ContactRow,
+    EnrichmentRow,
+    EventRow,
+    GoalRow,
+    RunRow,
+    ScoreRow,
+    TaskRow,
+)
 
 
 def _json(value: Any) -> Jsonb | None:
@@ -418,6 +427,39 @@ class Repository:
                 "run_id": run_id,
             },
             EnrichmentRow,
+        )
+
+    def insert_contact(
+        self,
+        business_id: uuid.UUID,
+        name: str,
+        source: str,
+        *,
+        role: str = "unknown",
+        phone: str | None = None,
+        email: str | None = None,
+        source_url: str | None = None,
+        confidence: float = 0.5,
+    ) -> ContactRow:
+        """Record one named contact. Append-only, like `insert_enrichment`.
+
+        A blank name is never passed here -- an extractor that could not find one records
+        nothing at all, and this layer trusts that decision rather than re-deriving a rule
+        that belongs to whichever module found the name.
+        """
+        return self._one(
+            queries.INSERT_CONTACT,
+            {
+                "business_id": business_id,
+                "name": name,
+                "role": role,
+                "phone": phone,
+                "email": email,
+                "source": source,
+                "source_url": source_url,
+                "confidence": confidence,
+            },
+            ContactRow,
         )
 
     def insert_score(

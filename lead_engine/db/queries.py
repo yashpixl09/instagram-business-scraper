@@ -20,7 +20,16 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-from .rows import BusinessRow, EnrichmentRow, EventRow, GoalRow, RunRow, ScoreRow, TaskRow
+from .rows import (
+    BusinessRow,
+    ContactRow,
+    EnrichmentRow,
+    EventRow,
+    GoalRow,
+    RunRow,
+    ScoreRow,
+    TaskRow,
+)
 
 
 def column_list(row_class: type, prefix: str = "") -> str:
@@ -40,6 +49,7 @@ TASK_COLUMNS = column_list(TaskRow)
 EVENT_COLUMNS = column_list(EventRow)
 BUSINESS_COLUMNS = column_list(BusinessRow)
 ENRICHMENT_COLUMNS = column_list(EnrichmentRow)
+CONTACT_COLUMNS = column_list(ContactRow)
 SCORE_COLUMNS = column_list(ScoreRow)
 
 
@@ -281,6 +291,16 @@ INSERT_ENRICHMENT = f"""
 INSERT INTO enrichments (business_id, source, status, data, source_url, run_id)
 VALUES (%(business_id)s, %(source)s, %(status)s, %(data)s, %(source_url)s, %(run_id)s)
 RETURNING {ENRICHMENT_COLUMNS}
+"""
+
+# Append-only, same reasoning as `INSERT_ENRICHMENT`: a page that names a second contact on
+# a later fetch adds a row rather than overwriting the first. `found_at` is left to its
+# `now()` default, same as `fetched_at` above.
+INSERT_CONTACT = f"""
+INSERT INTO contacts (business_id, name, role, phone, email, source, source_url, confidence)
+VALUES (%(business_id)s, %(name)s, %(role)s, %(phone)s, %(email)s, %(source)s,
+        %(source_url)s, %(confidence)s)
+RETURNING {CONTACT_COLUMNS}
 """
 
 # Append-only for the same reason, plus one of its own: scores are versioned. The

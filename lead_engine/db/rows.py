@@ -133,6 +133,27 @@ class EnrichmentRow:
 
 
 @dataclass(frozen=True)
+class ContactRow:
+    """A row of `contacts` -- a named PERSON, distinct from `businesses.email`'s general inbox.
+
+    Append-only, like `EnrichmentRow`: a page that names two owners over two different
+    fetches is two facts, not one overwritten by the other. `role` is `owner|manager|
+    marketing|unknown` and `confidence` is `real` in Postgres, hence `float` here.
+    """
+
+    id: int
+    business_id: UUID
+    name: str | None
+    role: str | None
+    phone: str | None
+    email: str | None
+    source: str
+    source_url: str | None
+    confidence: float
+    found_at: datetime
+
+
+@dataclass(frozen=True)
 class ScoreRow:
     """A row of `scores`.
 

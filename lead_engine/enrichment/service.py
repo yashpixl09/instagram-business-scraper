@@ -26,6 +26,15 @@ so issuing a second query for it would double the rate-limit cost of the whole s
 learn something already on the page. `_lookup` therefore searches once and hands the
 results to both modules.
 
+A NAMED CONTACT RIDES THE SAME FETCH
+-------------------------------------
+`_grade` fetches a business's own homepage to grade the site, and that text is briefly in
+memory before being dropped. `contacts.py` reads it once more, for a named owner/manager/
+marketing contact, before it goes -- zero marginal cost, since the page was already paid
+for. See that module's docstring for why this is the only one of the design spec's five
+contact sources built so far, and why it never writes a "found nobody" row: an extractor
+that cannot find a name records nothing, full stop.
+
 STATUS IS NOT A LOG LEVEL
 -------------------------
 Every row written here carries one of four statuses, and the distinctions are the point:
@@ -60,6 +69,7 @@ from uuid import UUID
 
 from ..providers.errors import ProviderError
 from . import ads as ads_module
+from . import contacts as contacts_module
 from . import social as social_module
 from . import website as website_module
 from .ads import AdFinding
@@ -116,12 +126,12 @@ class WebProvider(Protocol):
 
 
 class EvidenceStore(Protocol):
-    """`Repository`, narrowed to the one append-only write this phase performs.
+    """`Repository`, narrowed to the two append-only writes this phase performs.
 
-    Deliberately just `insert_enrichment`. This phase never updates `businesses`: the
-    handle it finds is an OBSERVATION with a timestamp and a provenance, and promoting it
-    onto the business row is a decision for whatever reconciles observations, not for the
-    thing that made one.
+    `insert_enrichment` and, since this contacts slice, `insert_contact`. Both are
+    observations with a timestamp and a provenance; this phase never updates `businesses`
+    or promotes a contact onto anything else, because reconciling observations is a
+    decision for whatever reads them later, not for the thing that made one.
     """
 
     def insert_enrichment(
@@ -133,6 +143,19 @@ class EvidenceStore(Protocol):
         *,
         source_url: str | None = None,
         run_id: UUID | None = None,
+    ) -> Any: ...
+
+    def insert_contact(
+        self,
+        business_id: UUID,
+        name: str,
+        source: str,
+        *,
+        role: str = "unknown",
+        phone: str | None = None,
+        email: str | None = None,
+        source_url: str | None = None,
+        confidence: float = 0.5,
     ) -> Any: ...
 
 
@@ -328,6 +351,7 @@ class EnrichmentService:
             if WEBSITE not in skipped:
                 site, page_text = self._assess_website(request, results, query, answer)
                 rows += self._write_website(request, site, answer)
+                rows += self._write_contacts(request, page_text, site.url)
                 self._remember(request.business_id, WEBSITE, site.status, now)
 
             if INSTAGRAM not in skipped:
@@ -536,6 +560,37 @@ class EnrichmentService:
         return self._record(
             request, SOURCE_INSTAGRAM, finding.status, payload, source_url=finding.url
         )
+
+    def _write_contacts(
+        self, request: EnrichmentRequest, page_text: str | None, site_url: str | None
+    ) -> int:
+        """Read named contacts out of the homepage text `_grade` already fetched.
+
+        `page_text` is None whenever there was nothing to read it from: no site was found,
+        grading is disabled, or the fetch itself failed. In every one of those cases there
+        is no page to read a contact off, so this is a no-op rather than a row recording an
+        absence -- `contacts` has no status column, and never guesses a `no_data` in place
+        of one either.
+        """
+        if not page_text:
+            return 0
+        extraction = contacts_module.find_contacts(page_text, source_url=site_url)
+        written = 0
+        for candidate in extraction.candidates:
+            if self._store is None:
+                break
+            self._store.insert_contact(
+                request.business_id,
+                candidate.name,
+                candidate.source,
+                role=candidate.role,
+                phone=candidate.phone,
+                email=candidate.email,
+                source_url=candidate.source_url,
+                confidence=candidate.confidence,
+            )
+            written += 1
+        return written
 
     def _write_ads(self, request: EnrichmentRequest, finding: AdFinding) -> int:
         return self._record(
