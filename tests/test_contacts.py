@@ -8,11 +8,15 @@ clearly tied -- in the same line, or a name-only line paired with the very next 
 -- to a role, a phone, or an email. A bare name gets nothing. A bare email or phone gets
 nothing. Two facts that merely share a page, but not a line, get nothing.
 
-*Only the `website` source.* `review_reply`, `ig_bio`, `directory` and `search` all need
-capability or budget this slice does not have -- see `lead_engine/enrichment/contacts.py`'s
-module docstring for the individual blockers. This suite only ever calls `find_contacts`
-with plain text, and the wiring test at the bottom checks `EnrichmentService` writes a
-`contacts` row only when grading text was fetched and a candidate was found in it.
+*`website` and `ig_bio` only.* `review_reply`, `directory` and `search` all need capability
+or budget this slice does not have -- see `lead_engine/enrichment/contacts.py`'s module
+docstring for the individual blockers. `ig_bio` shares `find_contacts`' extraction engine
+via `find_bio_contacts`, at 0.6 confidence instead of `website`'s 0.8; `IgBioTests` below
+confirms the same never-guess rules hold over bio text and that the two sources never bleed
+into each other's confidence or source label. The wiring test at the bottom checks
+`EnrichmentService` writes a `contacts` row only when grading text was fetched and a
+candidate was found in it -- that wiring is `website`-only; `ig_bio` has no pipeline caller
+yet (see the module docstring).
 
 NO TEST HERE REACHES THE NETWORK.
 """
@@ -22,19 +26,21 @@ from __future__ import annotations
 import unittest
 import uuid
 
+from lead_engine.enrichment.cache import InMemoryCache
 from lead_engine.enrichment.contacts import (
+    CONFIDENCE_IG_BIO,
     ROLE_MANAGER,
     ROLE_MARKETING,
     ROLE_OWNER,
     ROLE_UNKNOWN,
+    SOURCE_IG_BIO,
     SOURCE_WEBSITE,
     ContactCandidate,
     ContactExtraction,
+    find_bio_contacts,
     find_contacts,
 )
 from lead_engine.enrichment.service import EnrichmentRequest, EnrichmentService
-from lead_engine.enrichment.cache import InMemoryCache
-
 
 NOW_KW = {"cache": InMemoryCache()}
 
@@ -233,6 +239,50 @@ class MultipleContactsTests(unittest.TestCase):
         )
         extraction = find_contacts(text, source_url=None)
         self.assertEqual(len(extraction.candidates), 1)
+
+
+class IgBioTests(unittest.TestCase):
+    """`find_bio_contacts` -- the `ig_bio` source, sharing `find_contacts`' engine at 0.6."""
+
+    def test_a_named_owner_in_a_bio_is_recorded_at_ig_bio_confidence(self):
+        bio = "Owner: Priya Sharma | priya@cakebee.in | Custom cakes, Indiranagar"
+        extraction = find_bio_contacts(bio, source_url="https://instagram.com/cakebee/")
+        self.assertEqual(len(extraction.candidates), 1)
+        candidate = extraction.candidates[0]
+        self.assertEqual(candidate.name, "Priya Sharma")
+        self.assertEqual(candidate.role, ROLE_OWNER)
+        self.assertEqual(candidate.source, SOURCE_IG_BIO)
+        self.assertEqual(candidate.confidence, CONFIDENCE_IG_BIO)
+
+    def test_website_confidence_is_unaffected_by_ig_bio_existing(self):
+        # A regression guard on find_contacts' new default arguments: an existing website
+        # caller that never learned about `source`/`confidence` must see the old behaviour.
+        text = "Owner: Priya Sharma, priya@cakebee.in"
+        extraction = find_contacts(text, source_url="https://cakebee.in")
+        candidate = extraction.candidates[0]
+        self.assertEqual(candidate.source, SOURCE_WEBSITE)
+        self.assertNotEqual(candidate.confidence, CONFIDENCE_IG_BIO)
+
+    def test_a_bio_with_no_attributable_name_records_nothing(self):
+        # Same never-guess rule as a homepage: a bare contact detail in a bio is not a
+        # contact just because it is the only thing on the page.
+        bio = "DM us or call 9876543210 for custom orders!"
+        self.assertEqual(find_bio_contacts(bio).candidates, ())
+
+    def test_a_bio_with_no_name_or_detail_records_nothing(self):
+        bio = "Fresh cakes daily. Indiranagar, Bangalore. Order now!"
+        self.assertEqual(find_bio_contacts(bio).candidates, ())
+
+    def test_none_bio_records_nothing(self):
+        self.assertEqual(find_bio_contacts(None).candidates, ())
+
+    def test_source_url_defaults_to_none_and_is_carried_through(self):
+        extraction = find_bio_contacts("Founder: Raj Kumar, raj@cakebee.in")
+        self.assertIsNone(extraction.candidates[0].source_url)
+        extraction = find_bio_contacts(
+            "Founder: Raj Kumar, raj@cakebee.in", source_url="https://instagram.com/cakebee/"
+        )
+        self.assertEqual(extraction.candidates[0].source_url, "https://instagram.com/cakebee/")
 
 
 class DataclassTests(unittest.TestCase):
