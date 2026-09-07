@@ -104,7 +104,6 @@ from .schemas import (
     ApiProblem,
     BudgetOut,
     ConfigStatusOut,
-    EnrichSpec,
     LeadListOut,
     LeadOut,
     NicheListOut,

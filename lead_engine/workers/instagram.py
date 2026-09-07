@@ -90,8 +90,9 @@ import json
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from ..enrichment.cache import INSTAGRAM, EnrichmentCache, utc_now

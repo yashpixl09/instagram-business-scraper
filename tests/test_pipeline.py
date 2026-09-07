@@ -56,7 +56,6 @@ import pytest
 
 from lead_engine.api.deps import (
     AUTOMATION_PITCH,
-    DEFAULT_OUTREACH_CHANNEL,
     ENRICHED_SCORER_VERSION,
     WEBSITE_PITCH,
     Engine,
@@ -66,7 +65,7 @@ from lead_engine.api.schemas import ApiProblem
 from lead_engine.automations import AUTOMATION_OFFERS
 from lead_engine.config import Settings
 from lead_engine.enrichment.ads import read_ad_library
-from lead_engine.enrichment.service import AdFinding, BusinessEnrichment, HandleFinding
+from lead_engine.enrichment.service import BusinessEnrichment, HandleFinding
 from lead_engine.enrichment.website import assess as website_assess
 from lead_engine.enrichment.website import grade_site
 
@@ -197,7 +196,9 @@ class FakeRepository:
         return row
 
     def insert_contact(self, business_id, name, source, **kwargs):
-        row = SimpleNamespace(id=self._id(), business_id=business_id, name=name, source=source, **kwargs)
+        row = SimpleNamespace(
+            id=self._id(), business_id=business_id, name=name, source=source, **kwargs
+        )
         self.contacts.append(row)
         return row
 
@@ -206,7 +207,9 @@ class FakeRepository:
         self.scores.append(row)
         return row
 
-    def insert_automation_opportunity(self, business_id, opportunity_id, *, confidence, trigger_signals, evidence):
+    def insert_automation_opportunity(
+        self, business_id, opportunity_id, *, confidence, trigger_signals, evidence
+    ):
         key = (business_id, opportunity_id)
         self.automation_opportunities[key] = {
             "business_id": business_id,
@@ -336,7 +339,6 @@ class VerdictGateTests(unittest.TestCase):
 
     def test_a_skip_verdict_business_gets_no_automation_opportunity(self):
         engine, report = self._run("skip")
-        repo = engine.repository
         self.assertEqual(report.offers_detected, 0)
 
     def test_every_enriched_business_gets_a_website_pitch_regardless_of_verdict(self):
@@ -551,13 +553,17 @@ class SignalTranslationTests(unittest.TestCase):
 
     def test_runs_meta_ads_traces_to_the_ad_library_row(self):
         ads = read_ad_library(AD_LIBRARY_FIVE_RESULTS, url="https://x")
-        enrichment = BusinessEnrichment(business_id=uuid.uuid4(), website=None, social=None, ads=ads)
+        enrichment = BusinessEnrichment(
+            business_id=uuid.uuid4(), website=None, social=None, ads=ads
+        )
         signals, evidence = _translate_enrichment_signals(enrichment, {"ad_library": 42})
         self.assertIn("runs meta ads", signals)
         self.assertEqual(evidence["runs meta ads"], [42])
 
     def test_no_ads_finding_and_no_row_id_asserts_nothing(self):
-        enrichment = BusinessEnrichment(business_id=uuid.uuid4(), website=None, social=None, ads=None)
+        enrichment = BusinessEnrichment(
+            business_id=uuid.uuid4(), website=None, social=None, ads=None
+        )
         signals, evidence = _translate_enrichment_signals(enrichment, {})
         self.assertEqual(signals, set())
         self.assertEqual(evidence, {})
@@ -568,13 +574,18 @@ class SignalTranslationTests(unittest.TestCase):
         grade = grade_site(WEAK_SITE_TEXT * 3)
         assert grade is not None and "enquiry" in grade.gaps and "ordering" in grade.gaps
         website = replace(finding, grade=grade)
-        enrichment = BusinessEnrichment(business_id=uuid.uuid4(), website=website, social=None, ads=None)
-        signals, evidence = _translate_enrichment_signals(enrichment, {"tinyfish_web": 7})
-        self.assertEqual(
-            {"no booking link", "no enquiry form", "manual enquiry flow", "no online ordering"},
-            signals,
+        enrichment = BusinessEnrichment(
+            business_id=uuid.uuid4(), website=website, social=None, ads=None
         )
-        for signal in ("no booking link", "no enquiry form", "manual enquiry flow", "no online ordering"):
+        signals, evidence = _translate_enrichment_signals(enrichment, {"tinyfish_web": 7})
+        expected_signals = {
+            "no booking link",
+            "no enquiry form",
+            "manual enquiry flow",
+            "no online ordering",
+        }
+        self.assertEqual(expected_signals, signals)
+        for signal in expected_signals:
             self.assertEqual(evidence[signal], [7])
 
 
