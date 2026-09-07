@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str | None = None
     nvidia_api_key: SecretStr | None = None
+    # A file path, not a bearer value -- the credential lives inside the file this points
+    # at, so unlike the keys above there is nothing here for `SecretStr` to seal. The path
+    # itself is not sensitive; leaving it a plain string keeps `capabilities()` able to
+    # report whether it is SET without needing a dedicated unwrap.
+    google_sheets_credentials_path: str | None = None
+    google_sheets_spreadsheet_id: str | None = None
 
     # --- the values, each one named at the point of use ---------------------------------
 
@@ -118,6 +124,14 @@ class Settings(BaseSettings):
     @property
     def database_configured(self) -> bool:
         return self.dsn is not None
+
+    @property
+    def sheets_configured(self) -> bool:
+        """Both a key and a target are required -- a credential with nowhere to write is
+        exactly as unusable as a spreadsheet id with nothing to authenticate the write."""
+        return bool(self.google_sheets_credentials_path) and bool(
+            self.google_sheets_spreadsheet_id
+        )
 
     def provider_status(self) -> dict[str, bool]:
         """Which providers hold a key. Booleans, in registry order, never a value."""
@@ -145,6 +159,7 @@ class Settings(BaseSettings):
             "llm_configured": self.llm_configured,
             "search_budget": self.search_budget,
             "gemini_model": self.gemini_model,
+            "sheets_configured": self.sheets_configured,
         }
 
     @model_serializer(mode="plain")
