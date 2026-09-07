@@ -46,7 +46,6 @@ from lead_engine.workers.instagram import (
     STATUS_NO_DATA,
     STATUS_OK,
     InstagramProfileLookup,
-    ProfileFinding,
     RateGatedInstagramBrowser,
     extract_profile,
     unavailable,
@@ -246,6 +245,33 @@ class ExtractRateLimitedTests(unittest.TestCase):
 
     def test_no_data_is_fabricated(self):
         self.assertIsNone(self.finding.followers)
+
+
+class ExtractLiveCapturedRateLimitTests(unittest.TestCase):
+    """Not a synthetic fixture -- the actual HTML Instagram served during this session's
+    one supervised, human-assisted live login test (2026-09-06), when a profile-info fetch
+    followed shortly after login. Kept as independent proof that `_BLOCKED_MARKERS` matches
+    real Instagram wording, not just the hand-written shape in `rate_limited_challenge.html`.
+    No further live requests were made once this response was seen -- see this module's
+    docstring on why repeated attempts against a real session are exactly the risk this
+    whole design exists to avoid.
+    """
+
+    def setUp(self) -> None:
+        self.finding = extract_profile(
+            fixture("live_rate_limited_capture.html"), handle="test_ig_09"
+        )
+
+    def test_status_is_blocked(self):
+        self.assertEqual(self.finding.status, STATUS_BLOCKED)
+
+    def test_reason_is_recorded(self):
+        self.assertEqual(self.finding.reason, "challenge or rate-limit page returned")
+
+    def test_no_data_is_fabricated(self):
+        self.assertIsNone(self.finding.followers)
+        self.assertIsNone(self.finding.bio)
+        self.assertIsNone(self.finding.is_private)
         self.assertIsNone(self.finding.bio)
 
     def test_a_json_body_that_reports_a_checkpoint_is_also_blocked(self):
