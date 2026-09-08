@@ -35,7 +35,7 @@ import os
 import re
 import unittest
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -1541,6 +1541,43 @@ def test_a_seeded_business_survives_the_whole_round_trip(db, tmp_path):
     assert cell_at(sheet, 2, "total_score").value == 71
     assert cell_at(sheet, 2, "signals").value == "no website"
     assert cell_at(sheet, 2, "reviews").comment.text == "https://maps.example/blush"
+
+
+@pytest.mark.integration
+@needs_postgres
+def test_ai_summary_reads_from_the_latest_scores_row_not_a_hardcoded_null(db, tmp_path):
+    """Was `NULL::text AS ai_summary` -- nothing wrote one, nothing could read one.
+    `Engine.execute_enrichment` now writes it into the latest score's own `evidence` jsonb,
+    beside `pitch_angle`; this proves the export query actually reads it back from there."""
+    business_id = seed_business(db, name="Enriched Salon")
+    db.execute(
+        "INSERT INTO scores (business_id, scorer_version, signals, evidence, audience_index,"
+        " total, scored_at) VALUES (%s, 'enriched', '{}', %s, 0.5, 84, %s)",
+        (
+            business_id,
+            Jsonb({"pitch_angle": "no website", "ai_summary": "A salon with no website."}),
+            NOW + timedelta(minutes=5),
+        ),
+    )
+
+    path = excel.export(db, tmp_path / "leads.xlsx")
+    sheet = load_workbook(path)[SHEET_TITLE]
+
+    # The LATEST score (enriched, scored 5 minutes later) wins, not the google-only one.
+    assert cell_at(sheet, 2, "total_score").value == 84
+    assert cell_at(sheet, 2, "ai_summary").value == "A salon with no website."
+
+
+@pytest.mark.integration
+@needs_postgres
+def test_ai_summary_is_blank_on_a_google_only_score(db, tmp_path):
+    """No enrichment pass has run, so there is nothing to summarise -- blank, not a guess."""
+    seed_business(db, name="Undiscovered Salon")
+
+    path = excel.export(db, tmp_path / "leads.xlsx")
+    sheet = load_workbook(path)[SHEET_TITLE]
+
+    assert cell_at(sheet, 2, "ai_summary").value is None
 
 
 @pytest.mark.integration

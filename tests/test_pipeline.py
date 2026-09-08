@@ -383,6 +383,14 @@ class DeterministicFallbackTests(unittest.TestCase):
         # `copy.build_fallback_outreach`'s own template: "Hi {name},\n\n..."
         self.assertTrue(website_rows[0]["body"].startswith("Hi Sunrise Salon,"))
 
+    def test_ai_summary_is_the_deterministic_template_without_ai(self):
+        engine, row = self._engine()
+        engine.execute_enrichment(business_ids=[row["id"]], use_ai=False)
+        ai_summary = engine.repository.scores[-1]["evidence"]["ai_summary"]
+        # `copy.build_fallback_summary`'s own template: "{name} is a {niche} lead in ..."
+        self.assertTrue(ai_summary.startswith("Sunrise Salon is a"))
+        self.assertNotIn("Hi Sunrise Salon,", ai_summary)  # never the outreach shape
+
     def test_no_configured_llm_provider_also_falls_back_without_raising(self):
         # `use_ai=True` but zero providers configured: `LLMRouter.from_settings` still
         # returns a working router (the chain's own guarantee), never raising here either.
@@ -412,10 +420,20 @@ class AiExpansionTests(unittest.TestCase):
             automation_rows[0]["body"],
             f"AI: {AUTOMATION_OFFERS['appointment_booking'].pitch_line}",
         )
-        # Two prompts: one per pitch. Every one is grounded in the business's own name.
-        self.assertEqual(len(router.calls), 2)
+        # The ai_summary lives in the score's own evidence, beside pitch_angle -- not in
+        # outreach, which has no place for a message addressed to nobody.
+        ai_summary = engine.repository.scores[-1]["evidence"]["ai_summary"]
+        self.assertTrue(ai_summary.startswith("AI: "))
+        self.assertIn("Sunrise Salon", ai_summary)
+        # Three prompts: website pitch, automation pitch, and the summary. Every one is
+        # grounded in the business's own name, and the summary's prompt is NOT identical to
+        # the website pitch's -- see `_summary_prompt`'s docstring on why a shared prompt
+        # would collide in the LLM cache and silently make the two fields identical.
+        self.assertEqual(len(router.calls), 3)
         for call in router.calls:
             self.assertIn("Sunrise Salon", call.prompt)
+        prompts = {call.prompt for call in router.calls}
+        self.assertEqual(len(prompts), 3, "two of the three prompts were identical")
 
     def test_the_automation_prompt_repeats_the_never_fabricate_rule(self):
         site = ("https://sunrisesalon.example", WEAK_SITE_TEXT)

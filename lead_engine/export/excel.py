@@ -127,9 +127,13 @@ SELECT lb.name                       AS business_name,
        lb.audience_band              AS audience_band,
        lb.banding_method             AS banding_method,
        sc.signals                    AS signals,
-       -- Nothing writes an AI summary yet. Selected as NULL so the column is visibly
-       -- accounted for here and the later phase has one obvious place to wire it in.
-       NULL::text                    AS ai_summary,
+       -- Written by `Engine.execute_enrichment` into the latest `scores` row's own
+       -- `evidence` jsonb, beside `pitch_angle` -- an internal, third-person briefing about
+       -- the lead, not a message to send it, so it belongs with the agent's own notes on
+       -- the lead rather than in `outreach` (whose `channel` column means "sent via", which
+       -- an internal summary has none of). NULL on a `google-only` score, since enrichment
+       -- has not run yet and there is nothing to summarise beyond the raw listing.
+       sc.evidence->>'ai_summary'    AS ai_summary,
        wp.body                       AS website_pitch,
        autos.opportunity_ids         AS automation_opportunities,
        ap.body                       AS automation_pitch,
@@ -165,7 +169,7 @@ SELECT lb.name                       AS business_name,
        LIMIT 1
   ) ig ON TRUE
   LEFT JOIN LATERAL (
-      SELECT s.signals
+      SELECT s.signals, s.evidence
         FROM scores s
        WHERE s.business_id = b.id
        ORDER BY s.scored_at DESC, s.id DESC

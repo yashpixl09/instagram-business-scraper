@@ -56,7 +56,7 @@ from psycopg_pool import ConnectionPool
 
 from ..automations import AutomationOffer, firing_offers
 from ..config import SEARCHAPI, Settings
-from ..copy import build_fallback_outreach, build_prompt
+from ..copy import build_fallback_outreach, build_fallback_summary, build_prompt
 from ..db.repository import Repository
 from ..discovery.cells import BREADTH_FIRST, CellPolicy, SearchCellStore
 from ..discovery.service import (
@@ -98,7 +98,7 @@ from ..providers.budget import BudgetNotConfigured, SearchBudget, fingerprint
 from ..providers.fixtures import FixtureMapsProvider
 from ..providers.searchapi import SearchApiClient
 from ..providers.tinyfish import TinyFishClient
-from ..scoring import audience_index, score_lead
+from ..scoring import audience_index, profiles_for_lead, score_lead
 from .schemas import (
     DEFAULT_VERIFICATION,
     ApiProblem,
@@ -1134,6 +1134,7 @@ class Engine:
             )
             observed = set(breakdown.signals) | enrichment_signals
 
+            ai_summary = _generate_ai_summary(router, lead, breakdown, profile)
             repository.insert_score(
                 business_id,
                 ENRICHED_SCORER_VERSION,
@@ -1145,6 +1146,7 @@ class Engine:
                 signals=list(breakdown.signals),
                 evidence={
                     "pitch_angle": breakdown.pitch_angle,
+                    "ai_summary": ai_summary,
                     "run_id": str(run_id) if run_id else None,
                 },
                 audience_index=index,
@@ -1485,6 +1487,60 @@ def _generate_website_pitch(
     if router is None:
         return fallback
     prompt = build_prompt(lead, breakdown, profiles)
+    return router.generate(prompt, fallback).text
+
+
+def _summary_prompt(lead: Lead, breakdown: Any, profiles: list[Any] | None) -> str:
+    """The LLM prompt for `ai_summary` -- deliberately its own text, not `copy.build_prompt`
+    reused verbatim.
+
+    The LLM cache keys on the prompt string alone (see `llm/cache.py`), so calling
+    `router.generate` twice for the same lead with an IDENTICAL prompt -- once for
+    `website_pitch`, once here -- would return the exact same cached text for both fields
+    the second time, from a cache hit that has no idea two different columns are asking.
+    `build_prompt`'s own instruction text already asks for "a concise factual qualification
+    summary", which is what this column needs, but `_generate_website_pitch` already
+    fills a DIFFERENT column from that same prompt, so this cannot reuse it and stay
+    distinct. Written instead to ask explicitly for the internal, third-person briefing
+    `ai_summary` actually is -- not a message addressed to the business, which is what
+    `website_pitch`'s prompt (and `build_fallback_outreach`'s fallback shape) produces.
+    """
+    selected = profiles or profiles_for_lead(lead)
+    labels = ", ".join(profile.label for profile in selected) or lead.category
+    return f"""You are briefing a salesperson on one qualified local-business lead before \
+they walk in, call, or DM.
+
+Business: {lead.name}
+Matched niche: {labels}
+Address: {lead.address}
+Phone found: {"yes" if lead.phone else "no"}
+Website/link: {lead.website or "none"}
+Score: {breakdown.total}/100
+Observed signals: {", ".join(breakdown.signals)}
+
+Write a concise, third-person internal summary (two to three sentences) a salesperson \
+would read before contacting this business -- not a message addressed to the business \
+itself. Do not invent reviews, followers, revenue, demand, or any fact not shown above.
+"""
+
+
+def _generate_ai_summary(
+    router: LLMRouter | None,
+    lead: Lead,
+    breakdown: Any,
+    profile: Any,
+) -> str:
+    """The `ai_summary` body: `copy.build_fallback_summary` verbatim without AI, or an LLM's
+    expansion of `_summary_prompt` with that same text as the guaranteed fallback.
+
+    `build_fallback_summary` -- read but never called anywhere until this -- is exactly
+    shaped for this column: a third-person statement about the lead, not a message to it.
+    """
+    profiles = [profile] if profile else None
+    fallback = build_fallback_summary(lead, breakdown, profiles)
+    if router is None:
+        return fallback
+    prompt = _summary_prompt(lead, breakdown, profiles)
     return router.generate(prompt, fallback).text
 
 
