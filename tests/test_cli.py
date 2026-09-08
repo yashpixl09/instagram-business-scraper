@@ -26,6 +26,7 @@ fixture or raises, and the resolver is the offline seed.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from pathlib import Path
@@ -537,6 +538,47 @@ def test_a_fixture_run_discovers_scores_and_writes_the_sheet(pool, tmp_path, cap
 
 @integration
 @needs_postgres
+def test_a_discovery_run_stamps_its_run_id_on_the_google_maps_enrichment_row(pool, tmp_path):
+    """Found end-to-end: `--enrich` reported zero businesses enriched, zero scored, zero
+    offers, on ten genuinely new leads from a real SearchAPI call. Root cause traced to
+    `Engine.execute_run`: it built `DiscoveryRequest` without `run_id=run_id`, even though
+    `run_id` is right there and passed to `self._score(...)` two lines later. Every
+    `google_maps` enrichment row `DiscoveryService.record_evidence` writes therefore carried
+    `run_id = NULL`, and `_enrichment_targets`'s `run_id`-keyed lookup --
+
+        b.id IN (SELECT e.business_id FROM enrichments e WHERE e.run_id = %(run_id)s)
+
+    -- could never match a single business through that path, no matter how many were
+    found. `--enrich business_ids=[...]` explicitly still worked (the query's other OR
+    branch), which is exactly why this stayed invisible: every existing test either supplied
+    business_ids directly or used a fake `_enrichment_targets` that never touched this SQL.
+    """
+    code = cli.main(
+        [
+            "--city", "Bangalore",
+            "--area", "Indiranagar",
+            "--niche", "salon",
+            "--fixtures", str(CORPUS),
+            "--output-dir", str(tmp_path),
+        ],
+        settings=make_settings(lead_engine_dsn=DSN, searchapi_key=KEY),
+        engine=fixture_engine(pool),
+    )
+    assert code == cli.EXIT_OK
+
+    with pool.connection() as connection:
+        run_id = connection.execute("SELECT id FROM runs").fetchone()[0]
+        rows = connection.execute(
+            "SELECT business_id, run_id FROM enrichments WHERE source = 'google_maps'"
+        ).fetchall()
+
+    assert rows, "discovery wrote no google_maps enrichment rows at all"
+    for business_id, stamped_run_id in rows:
+        assert stamped_run_id == run_id, f"business {business_id} was not stamped with its run"
+
+
+@integration
+@needs_postgres
 def test_a_second_pass_over_the_same_ground_finds_nothing_and_exits_1(pool, tmp_path, capsys):
     """The boundary dedupe, from the operator's side.
 
@@ -597,3 +639,58 @@ def test_a_fixture_run_never_touches_the_ledger(pool, tmp_path):
         used = connection.execute("SELECT sum(used) FROM search_budget").fetchone()[0]
     assert used == 0
     assert engine.remaining_budget() == 50
+
+
+@integration
+@needs_postgres
+def test_main_seeds_the_ledger_for_a_key_it_has_never_seen():
+    """A key used only through the CLI must be able to spend its first search.
+
+    Found by actually running the real path against a real, never-before-used key: the API
+    server seeds a fresh key's ledger row once at process startup (`api/app.py`'s startup
+    hook), and `cli.main()` had no equivalent moment, so `SearchBudget.spend()` -- which
+    refuses on principle rather than seeding itself -- raised `BudgetNotConfigured` on the
+    very first real search a CLI-only key ever tried to make. `--dry-run` never caught it,
+    because planning only READS the ledger and tolerates an absent row as "unknown".
+
+    This test builds the engine the way an operator actually does -- through `cli.main`
+    with no `engine=` override, so `build_cli_engine` runs and the fix's `ensure_budget()`
+    call is the one under test, not bypassed the way `fixture_engine()` bypasses it above.
+    `--dry-run` is deliberate too: it never touches discovery (so nothing here depends on
+    what the geocoder or the fixture corpus decides is "new"), but `ensure_budget()` runs
+    before `--dry-run`'s early return either way -- exactly the ordering the bug was in.
+
+    Deliberately NOT using the `pool` fixture's isolated schema: `build_cli_engine` builds
+    its own pool straight from `settings.dsn`, with no schema pinning, exactly as a real
+    deployment's one-DSN-one-schema CLI invocation would -- so this connects to that same
+    target directly, with its own unique, disposable key so it cannot collide with anything
+    else and cleans its own row up afterward rather than leaving it in a shared schema.
+    """
+    key = f"sk-test-ledger-seed-{uuid.uuid4().hex}"
+    settings = make_settings(lead_engine_dsn=DSN, searchapi_key=key)
+
+    try:
+        code = cli.main(
+            ["--city", "Bangalore", "--area", "Indiranagar", "--niche", "salon", "--dry-run"],
+            settings=settings,
+        )
+
+        assert code == cli.EXIT_OK
+        fingerprint = hashlib.sha256(key.encode()).hexdigest()[:12]
+        with psycopg.connect(DSN) as connection:
+            row = connection.execute(
+                "SELECT limit_total, used FROM search_budget "
+                "WHERE provider = 'searchapi' AND purpose = 'discover' "
+                "AND key_fingerprint = %s",
+                (fingerprint,),
+            ).fetchone()
+        assert row is not None, "no ledger row was seeded for a key the CLI just used"
+        limit_total, used = row
+        assert limit_total == settings.search_budget
+        assert used == 0  # a dry run spends nothing; only the ceiling should exist
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as connection:
+            connection.execute(
+                "DELETE FROM search_budget WHERE key_fingerprint = %s",
+                (hashlib.sha256(key.encode()).hexdigest()[:12],),
+            )

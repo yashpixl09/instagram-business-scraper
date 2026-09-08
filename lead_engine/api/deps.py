@@ -875,6 +875,13 @@ class Engine:
                     limit=spec.limit,
                     policy=self.policy,
                     max_searches=max_searches,
+                    # Every `google_maps` enrichment row this pass writes is stamped with
+                    # this run's id -- omitted here, it silently defaulted to NULL, and
+                    # `_enrichment_targets`'s run_id lookup (added when execute_enrichment
+                    # was wired in) can only ever find a business through that stamp. A
+                    # business discovered without this would be permanently invisible to
+                    # `--enrich` unless the caller separately named it by business_ids.
+                    run_id=run_id,
                 )
             )
 

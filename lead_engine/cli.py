@@ -395,6 +395,14 @@ def main(
         if problem is not None:
             return _fail(problem)
         engine = build_cli_engine(args, settings)
+        # The API server seeds a fresh key's ledger row once at process startup
+        # (`api/app.py`'s startup hook) -- the CLI has no equivalent moment, so it never ran
+        # here at all. A key that had only ever been used through the CLI could never spend
+        # its first search: `SearchBudget.spend()` refuses on principle rather than seeding
+        # itself, so `--dry-run` (which only reads) looked fine while a real run crashed on
+        # its first search with `BudgetNotConfigured`. Idempotent, so a key that already has
+        # a row is untouched.
+        engine.ensure_budget()
 
     try:
         return _run(args, spec, engine)
