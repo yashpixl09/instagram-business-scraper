@@ -82,6 +82,14 @@ RESERVED_SEGMENTS = frozenset(
         "static",
         "images",
         "favicon.ico",
+        # `instagram.com/popular/<slug>/` is Instagram's own tag/topic aggregation page --
+        # the same shape as `/explore/` or `/p/`, just discovered live: four real
+        # businesses this session (Shri Krishna Sweets, Monalisa Boutique, Ananya Designer
+        # Boutique, Annu Shree Boutique) all got "popular" stored as their handle, each from
+        # a URL like `instagram.com/popular/krishna-mysore-pak/` -- Google's indexed copy of
+        # a topic page, not a profile. `handle_from_url` took the first path segment without
+        # knowing this one is reserved too.
+        "popular",
     }
 )
 

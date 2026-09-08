@@ -268,6 +268,10 @@ class HandleTests(unittest.TestCase):
             "https://instagram.com/explore/tags/cake",
             "https://instagram.com/reels/abc123",
             "https://instagram.com/p/xyz",
+            # Found live: four real businesses this session got "popular" stored as their
+            # handle, from Google-indexed URLs shaped exactly like this -- Instagram's own
+            # tag/topic aggregation page, not a profile.
+            "https://www.instagram.com/popular/krishna-mysore-pak/",
         ):
             with self.subTest(url=url):
                 self.assertIsNone(handle_from_url(url))
