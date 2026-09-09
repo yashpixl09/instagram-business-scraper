@@ -1570,6 +1570,51 @@ def test_ai_summary_reads_from_the_latest_scores_row_not_a_hardcoded_null(db, tm
 
 @pytest.mark.integration
 @needs_postgres
+def test_instagram_profile_data_reads_from_its_own_source_not_the_dead_one(db, tmp_path):
+    """Found live: a business with a real, manually-verified 107K-follower Instagram
+    profile on file still exported with a blank `followers` cell. Root cause: the query
+    joined on `source = 'instagram'`, a placeholder string from before any of the three
+    real Instagram-adjacent modules existed. None of them ever write that exact source --
+    `enrichment/social.py` writes `instagram_handle`, `workers/instagram.py` writes
+    `instagram_profile`, `enrichment/ads.py` writes `ad_library` -- so the join matched
+    nothing, for any business, ever, regardless of what real data existed.
+    """
+    business_id = seed_business(db, name="Corner House Real Data")
+    # `seed_business`'s own fixture default hardcodes a handle directly onto `businesses`,
+    # which is not how production ever looks (that column is never written there -- see
+    # the comment on `instagram_handle` in EXPORT_QUERY). Cleared here so this test proves
+    # the real fallback path: reading the enrichment OBSERVATION, not the fixture's shortcut.
+    db.execute("UPDATE businesses SET instagram_handle = NULL WHERE id = %s", (business_id,))
+    db.execute(
+        "INSERT INTO enrichments (business_id, source, status, data, source_url)"
+        " VALUES (%s, 'instagram_handle', 'ok', %s, %s)",
+        (business_id, Jsonb({"handle": "cornerhouseicecreams"}), "https://instagram.com/x"),
+    )
+    db.execute(
+        "INSERT INTO enrichments (business_id, source, status, data, source_url)"
+        " VALUES (%s, 'instagram_profile', 'ok', %s, %s)",
+        (
+            business_id,
+            Jsonb({"followers": 107000, "engagement_rate": 0.03}),
+            "https://instagram.com/cornerhouseicecreams/",
+        ),
+    )
+    db.execute(
+        "INSERT INTO enrichments (business_id, source, status, data)"
+        " VALUES (%s, 'ad_library', 'ok', %s)",
+        (business_id, Jsonb({"runs_ads": True})),
+    )
+
+    path = excel.export(db, tmp_path / "leads.xlsx")
+    sheet = load_workbook(path)[SHEET_TITLE]
+
+    assert cell_at(sheet, 2, "instagram_handle").value == "cornerhouseicecreams"
+    assert cell_at(sheet, 2, "followers").value == 107000
+    assert cell_at(sheet, 2, "runs_ads").value == "yes"
+
+
+@pytest.mark.integration
+@needs_postgres
 def test_ai_summary_is_blank_on_a_google_only_score(db, tmp_path):
     """No enrichment pass has run, so there is nothing to summarise -- blank, not a guess."""
     seed_business(db, name="Undiscovered Salon")

@@ -70,7 +70,16 @@ INSTAGRAM_ENGAGEMENT_KEY = "engagement_rate"
 INSTAGRAM_ADS_KEY = "runs_ads"
 
 GOOGLE_SOURCE = "google_maps"
-INSTAGRAM_SOURCE = "instagram"
+# Three separate real sources, not one -- `INSTAGRAM_SOURCE = "instagram"` was a placeholder
+# for a module that did not exist yet when this query was written (see the module note
+# above); none of the three modules that eventually shipped ever wrote that exact string,
+# so the join it named matched nothing, silently, since the day each module landed.
+# Proven live: a business with a real, manually-verified 107K-follower Instagram profile on
+# file (`instagram_profile`) still exported with a blank `followers` cell, because the join
+# was looking for `source = 'instagram'`.
+INSTAGRAM_HANDLE_SOURCE = "instagram_handle"
+INSTAGRAM_PROFILE_SOURCE = "instagram_profile"
+ADS_SOURCE = "ad_library"
 
 # One row per business, joined to the freshest of everything else.
 #
@@ -108,7 +117,11 @@ SELECT lb.name                       AS business_name,
        b.phone                       AS phone,
        b.email                       AS email,
        b.website                     AS website,
-       b.instagram_handle            AS instagram_handle,
+       -- `businesses.instagram_handle` is never written by anything today -- an enrichment
+       -- finding is an observation, and nothing promotes one onto the business row (see
+       -- `enrichment/service.py`'s own docstring on why). The real, current source of a
+       -- found handle is the `instagram_handle` enrichment observation itself.
+       coalesce(b.instagram_handle, ih.data->>'handle') AS instagram_handle,
        b.facebook_url                AS facebook_url,
        ct.name                       AS contact_name,
        ct.role                       AS contact_role,
@@ -119,10 +132,10 @@ SELECT lb.name                       AS business_name,
        g.data->>'{GOOGLE_RATING_KEY}'            AS rating,
        g.data->>'{GOOGLE_PEAK_HOURS_KEY}'        AS peak_hours,
        g.source_url                              AS google_source_url,
-       ig.data->>'{INSTAGRAM_FOLLOWERS_KEY}'     AS followers,
-       ig.data->>'{INSTAGRAM_ENGAGEMENT_KEY}'    AS engagement_rate,
-       ig.data->>'{INSTAGRAM_ADS_KEY}'           AS runs_ads,
-       ig.source_url                             AS instagram_source_url,
+       ip.data->>'{INSTAGRAM_FOLLOWERS_KEY}'     AS followers,
+       ip.data->>'{INSTAGRAM_ENGAGEMENT_KEY}'    AS engagement_rate,
+       ad.data->>'{INSTAGRAM_ADS_KEY}'           AS runs_ads,
+       coalesce(ip.source_url, ih.source_url)    AS instagram_source_url,
        lb.total                      AS total_score,
        lb.audience_band              AS audience_band,
        lb.banding_method             AS banding_method,
@@ -164,10 +177,24 @@ SELECT lb.name                       AS business_name,
   LEFT JOIN LATERAL (
       SELECT e.data, e.source_url
         FROM enrichments e
-       WHERE e.business_id = b.id AND e.source = '{INSTAGRAM_SOURCE}' AND e.status = 'ok'
+       WHERE e.business_id = b.id AND e.source = '{INSTAGRAM_HANDLE_SOURCE}' AND e.status = 'ok'
        ORDER BY e.fetched_at DESC, e.id DESC
        LIMIT 1
-  ) ig ON TRUE
+  ) ih ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT e.data, e.source_url
+        FROM enrichments e
+       WHERE e.business_id = b.id AND e.source = '{INSTAGRAM_PROFILE_SOURCE}' AND e.status = 'ok'
+       ORDER BY e.fetched_at DESC, e.id DESC
+       LIMIT 1
+  ) ip ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT e.data
+        FROM enrichments e
+       WHERE e.business_id = b.id AND e.source = '{ADS_SOURCE}' AND e.status = 'ok'
+       ORDER BY e.fetched_at DESC, e.id DESC
+       LIMIT 1
+  ) ad ON TRUE
   LEFT JOIN LATERAL (
       SELECT s.signals, s.evidence
         FROM scores s
