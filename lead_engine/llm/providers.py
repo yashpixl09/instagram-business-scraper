@@ -67,7 +67,11 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
+#: `llama-3.3-70b-versatile` was decommissioned by Groq sometime after this constant was
+#: first written -- confirmed live via `GET /openai/v1/models` on the real account this
+#: session (2026-09-09), which no longer lists it at all. `openai/gpt-oss-120b` is Groq's
+#: current large general-purpose model, same class and role as the one it replaces.
+GROQ_MODEL = "openai/gpt-oss-120b"
 GEMINI_MODEL = "gemini-2.5-flash"
 NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"
 
