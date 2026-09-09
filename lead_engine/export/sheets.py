@@ -152,7 +152,16 @@ class GoogleSheetsClient:
             # nothing to say, so this returns without one.
             return
         body = {
-            "valueInputOption": "USER_ENTERED",
+            # RAW, not USER_ENTERED -- found live. `USER_ENTERED` tells Sheets to parse
+            # every string the way a human's keystrokes would be, and a phone number like
+            # "+91 80 2520 3364" starts with the one character ('+') Sheets treats as a
+            # formula opener. The result was a literal `#ERROR!` in a real exported sheet's
+            # phone column. Every value this module writes is machine-produced, never
+            # something a human typed into this exact cell, so there is nothing here for
+            # USER_ENTERED's parsing to correctly help with and every string-shaped value
+            # (a phone number, a note starting with a dash, a place_id) is a candidate for
+            # it to guess wrong about instead.
+            "valueInputOption": "RAW",
             "data": [
                 {"range": range_name, "values": [list(row) for row in values]}
                 for range_name, values in updates.items()
@@ -169,7 +178,7 @@ class GoogleSheetsClient:
         self._service.spreadsheets().values().append(
             spreadsheetId=self._spreadsheet_id,
             range=range_name,
-            valueInputOption="USER_ENTERED",
+            valueInputOption="RAW",  # see batch_update_values' note on why RAW, not USER_ENTERED
             insertDataOption="INSERT_ROWS",
             body=body,
         ).execute()

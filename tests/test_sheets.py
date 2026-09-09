@@ -475,14 +475,17 @@ class GoogleSheetsClientShapeTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["spreadsheetId"], "sheet-123")
         self.assertEqual(calls[0][1]["range"], "Master!A1:Z")
 
-    def test_batch_update_uses_user_entered_input_and_every_range(self):
+    def test_batch_update_uses_raw_input_and_every_range(self):
+        # RAW, not USER_ENTERED -- found live. A phone number like "+91 80 2520 3364"
+        # starts with the one character Sheets treats as a formula opener under
+        # USER_ENTERED, and a real export once carried a literal #ERROR! because of it.
         calls: list = []
         client = GoogleSheetsClient(RecordingService(calls), "sheet-123")
         client.batch_update_values({"Master!C5": [["x"]], "Master!D5": [["y"]]})
         name, kwargs = calls[0]
         self.assertEqual(name, "values.batchUpdate")
         body = kwargs["body"]
-        self.assertEqual(body["valueInputOption"], "USER_ENTERED")
+        self.assertEqual(body["valueInputOption"], "RAW")
         ranges = {entry["range"] for entry in body["data"]}
         self.assertEqual(ranges, {"Master!C5", "Master!D5"})
 
