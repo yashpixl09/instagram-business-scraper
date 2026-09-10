@@ -100,6 +100,7 @@ from ..providers.errors import ProviderError
 from ..providers.fixtures import FixtureMapsProvider
 from ..providers.searchapi import SearchApiClient
 from ..providers.tinyfish import TinyFishClient
+from ..reachability import best_reach_channel
 from ..scoring import audience_index, profiles_for_lead, score_lead
 from .schemas import (
     DEFAULT_VERIFICATION,
@@ -905,7 +906,23 @@ class Engine:
         rows = self._select(SELECT_LEAD, {"id": lead_id})
         if not rows:
             raise ApiProblem(404, "lead_not_found", f"No lead with id {lead_id}.")
-        return LeadOut.model_validate(rows[0])
+        row = rows[0]
+        reach = best_reach_channel(
+            contact_phone=row.get("contact_phone"),
+            contact_name=row.get("contact_name"),
+            instagram_handle=row.get("instagram_handle"),
+            business_phone=row.get("phone"),
+            contact_email=row.get("contact_email"),
+            business_email=row.get("email"),
+        )
+        return LeadOut.model_validate(
+            {
+                **row,
+                "best_reach_channel": reach.channel if reach.found else None,
+                "best_reach_value": reach.value,
+                "best_reach_note": reach.note,
+            }
+        )
 
     def set_verdict(self, lead_id: UUID, update: VerdictUpdate) -> None:
         """Record the operator's verdict. 404 when the lead does not exist."""

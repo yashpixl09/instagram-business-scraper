@@ -884,6 +884,24 @@ def test_lead_detail_carries_contact_summary_and_pitches(live, pool):
     assert payload["ai_summary"] == "A real lead."
     assert payload["website_pitch"] == "Hi there"
     assert payload["automation_opportunities"] == ["appointment_booking"]
+    # A named contact's phone outranks the business's own (ambiguous mobile-or-landline)
+    # number -- see reachability.py on why that ranking is by provenance, not by guessing
+    # at the phone number's digits.
+    assert payload["best_reach_channel"] == "mobile"
+    assert payload["best_reach_value"] == "9123456789"
+
+
+@integration
+@needs_postgres
+def test_lead_detail_reach_channel_falls_back_through_instagram_to_the_bare_phone(live, pool):
+    business_id = add_business(pool)
+    with pool.connection() as connection:
+        connection.execute(
+            "UPDATE businesses SET instagram_handle = 'cakebee' WHERE id = %s", (business_id,)
+        )
+    payload = live.get(f"/api/leads/{business_id}").json()
+    assert payload["best_reach_channel"] == "instagram"
+    assert payload["best_reach_value"] == "cakebee"
 
 
 @integration

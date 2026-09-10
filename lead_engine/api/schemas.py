@@ -593,6 +593,14 @@ class LeadOut(BaseModel):
     automation_opportunities: list[str] | None = None
     automation_pitch: str | None = None
 
+    # The operator's own stated priority -- a verified mobile, then a social handle, then
+    # email last -- ranked by provenance rather than a phone number's digits. See
+    # `reachability.best_reach_channel`'s own docstring for the real, proven reason this
+    # module refuses to guess a phone number's type from its shape.
+    best_reach_channel: str | None = None
+    best_reach_value: str | None = None
+    best_reach_note: str | None = None
+
 
 class LeadListOut(BaseModel):
     run_id: UUID

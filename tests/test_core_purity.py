@@ -49,6 +49,10 @@ PURE = (
     # opportunity is a rule, not a judgement, and a rule that cannot reach the network cannot
     # quietly start guessing.
     "automations.py",
+    # Ranks a lead's already-found contact fields into one channel to try first. No I/O,
+    # and deliberately never inspects a phone number's digits to guess its type -- see the
+    # module's own docstring on why that guess is provably wrong on real data here.
+    "reachability.py",
 )
 
 #: Top-level modules that are deliberately NOT pure.

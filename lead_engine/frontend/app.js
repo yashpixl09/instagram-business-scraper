@@ -289,9 +289,13 @@ async function showLeadDetail(leadId) {
     const lead = await api("GET", `/api/leads/${leadId}`);
     const signals = (lead.signals || []).join(", ");
     const offers = (lead.automation_opportunities || []).join(", ");
+    const reachLabels = { mobile: "📱 Mobile", instagram: "📷 Instagram DM", phone: "☎️ Phone (type unknown)", email: "✉️ Email" };
     panel.innerHTML = `
       <h3>${lead.name}</h3>
       <p class="muted">${fmt(lead.niche_id)} · ${fmt(lead.city)}${lead.search_area ? " / " + lead.search_area : ""}</p>
+
+      <div class="field"><div class="field-label">Best way to reach out</div>
+        <div class="field-value">${lead.best_reach_channel ? `<strong>${reachLabels[lead.best_reach_channel] || lead.best_reach_channel}</strong>: ${lead.best_reach_value}\n${lead.best_reach_note || ""}` : "nothing found yet"}</div></div>
 
       <div class="field"><div class="field-label">Score / Band</div>
         <div class="field-value">${fmt(lead.score_total)} / <span class="${bandClass(lead.audience_band)}">${fmt(lead.audience_band)}</span></div></div>
