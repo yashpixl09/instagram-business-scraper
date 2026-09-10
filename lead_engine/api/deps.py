@@ -204,11 +204,55 @@ SELECT {_LEAD_COLUMNS}
  LIMIT %(limit)s
 """
 
+# One lead, not forty, so the joins `excel.py`'s own export query already proved out are
+# affordable here too -- a contact, the latest score's signals and ai_summary, both
+# drafted pitches, and every detected automation opportunity. Reuses the exact same source
+# constants `excel.py` reads from, rather than a second copy of the source-string mistake
+# that one already made once (see that module's own note on why).
 SELECT_LEAD = f"""
-SELECT {_LEAD_COLUMNS}
+SELECT {_LEAD_COLUMNS},
+       ct.name    AS contact_name,
+       ct.role    AS contact_role,
+       ct.phone   AS contact_phone,
+       ct.email   AS contact_email,
+       sc.signals AS signals,
+       sc.evidence->>'ai_summary' AS ai_summary,
+       wp.body    AS website_pitch,
+       autos.opportunity_ids AS automation_opportunities,
+       ap.body    AS automation_pitch
   FROM businesses b
   LEFT JOIN lead_bands lb ON lb.business_id = b.id
   LEFT JOIN verdicts v ON v.business_id = b.id
+  LEFT JOIN LATERAL (
+      SELECT c.name, c.role, c.phone, c.email
+        FROM contacts c
+       WHERE c.business_id = b.id
+       ORDER BY c.confidence DESC, c.found_at DESC, c.id DESC
+       LIMIT 1
+  ) ct ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT s.signals, s.evidence
+        FROM scores s
+       WHERE s.business_id = b.id
+       ORDER BY s.scored_at DESC, s.id DESC
+       LIMIT 1
+  ) sc ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT array_agg(a.opportunity_id ORDER BY a.confidence DESC, a.opportunity_id)
+                 AS opportunity_ids
+        FROM automation_opportunities a
+       WHERE a.business_id = b.id
+  ) autos ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT o.body FROM outreach o
+       WHERE o.business_id = b.id AND o.kind = 'website_pitch'
+       ORDER BY o.created_at DESC, o.id DESC LIMIT 1
+  ) wp ON TRUE
+  LEFT JOIN LATERAL (
+      SELECT o.body FROM outreach o
+       WHERE o.business_id = b.id AND o.kind = 'automation_pitch'
+       ORDER BY o.created_at DESC, o.id DESC LIMIT 1
+  ) ap ON TRUE
  WHERE b.id = %(id)s
 """
 
@@ -647,6 +691,7 @@ class Engine:
             database_configured=self._pool is not None or self.settings.database_configured,
             providers=providers,
             llm_configured=self.settings.llm_configured,
+            sheets_configured=self.settings.sheets_configured,
             search_budget=BudgetOut(
                 provider=SEARCHAPI,
                 configured=providers[SEARCHAPI],

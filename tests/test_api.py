@@ -850,6 +850,44 @@ def test_a_lead_is_fetched_by_id_with_its_band(live, pool):
 
 @integration
 @needs_postgres
+def test_lead_detail_carries_contact_summary_and_pitches(live, pool):
+    """The list view stays cheap; the detail view is where this is affordable -- see
+    LeadOut's own note on why these fields are None on GET /api/leads but populated here."""
+    business_id = add_business(pool)
+    with pool.connection() as connection:
+        connection.execute(
+            "INSERT INTO scores (business_id, scorer_version, total, signals, evidence,"
+            " audience_index) VALUES (%s, 'enriched', 71, %s, %s, 0.42)",
+            (business_id, '["no website", "public phone"]', '{"ai_summary": "A real lead."}'),
+        )
+        connection.execute(
+            "INSERT INTO contacts (business_id, name, role, phone, email, source, confidence)"
+            " VALUES (%s, 'Priya Sharma', 'owner', '9123456789', 'priya@x.in', 'website', 0.8)",
+            (business_id,),
+        )
+        connection.execute(
+            "INSERT INTO outreach (business_id, kind, channel, body, evidence)"
+            " VALUES (%s, 'website_pitch', 'email', 'Hi there', '{}')",
+            (business_id,),
+        )
+        connection.execute(
+            "INSERT INTO automation_opportunities (business_id, opportunity_id, confidence,"
+            " trigger_signals, evidence) VALUES (%s, 'appointment_booking', 1.0, '[]', '{}')",
+            (business_id,),
+        )
+
+    payload = live.get(f"/api/leads/{business_id}").json()
+
+    assert payload["contact_name"] == "Priya Sharma"
+    assert payload["contact_role"] == "owner"
+    assert payload["signals"] == ["no website", "public phone"]
+    assert payload["ai_summary"] == "A real lead."
+    assert payload["website_pitch"] == "Hi there"
+    assert payload["automation_opportunities"] == ["appointment_booking"]
+
+
+@integration
+@needs_postgres
 def test_an_unknown_lead_is_a_404(live):
     response = live.get(f"/api/leads/{uuid.uuid4()}")
 

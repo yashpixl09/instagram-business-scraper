@@ -472,6 +472,7 @@ class ConfigStatusOut(BaseModel):
     database_configured: bool
     providers: dict[str, bool]
     llm_configured: bool
+    sheets_configured: bool = False
     search_budget: BudgetOut
 
 
@@ -577,6 +578,20 @@ class LeadOut(BaseModel):
     channel: str | None = None
     outcome: str | None = None
     verdict_updated_at: datetime | None = None
+
+    # Detail-only: populated on GET /api/leads/{id}, always None on the list view -- see
+    # SELECT_LEAD vs SELECT_LEADS. Fetching a contact/pitch/summary join for every row of a
+    # 40-row list is exactly the cost `excel.py`'s own EXPORT_QUERY accepts for a one-shot
+    # export; an interactive list endpoint should not pay it on every poll.
+    contact_name: str | None = None
+    contact_role: str | None = None
+    contact_phone: str | None = None
+    contact_email: str | None = None
+    signals: list[str] | None = None
+    ai_summary: str | None = None
+    website_pitch: str | None = None
+    automation_opportunities: list[str] | None = None
+    automation_pitch: str | None = None
 
 
 class LeadListOut(BaseModel):
