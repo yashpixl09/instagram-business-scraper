@@ -56,7 +56,7 @@ from psycopg_pool import ConnectionPool
 
 from ..automations import AutomationOffer, firing_offers
 from ..config import SEARCHAPI, Settings
-from ..copy import build_fallback_outreach, build_fallback_summary, build_prompt
+from ..copy import build_fallback_outreach, build_fallback_summary
 from ..db.repository import Repository
 from ..discovery.cells import BREADTH_FIRST, CellPolicy, SearchCellStore
 from ..discovery.service import (
@@ -1614,10 +1614,10 @@ def _translate_enrichment_signals(
 def _automation_prompt(business_name: str, offer: AutomationOffer, signals: Sequence[str]) -> str:
     """The LLM prompt for expanding one automation offer's baseline pitch.
 
-    `copy.py` has no automation-pitch prompt of its own -- it is scoped to the website
-    pitch -- so this is written here, grounded exactly the way `copy.build_prompt` grounds
-    the website one: name the business, the offer, the observed evidence and the baseline
-    pitch, and repeat the project's non-negotiable rule verbatim.
+    `copy.py` has no automation-pitch prompt of its own, so this is written here, grounded
+    the same way `_website_pitch_prompt` grounds the website one: name the business, the
+    offer, the observed evidence and the baseline pitch, and repeat the project's
+    non-negotiable rule verbatim.
     """
     return (
         "You are writing a short outreach message pitching one workflow automation to a "
@@ -1639,36 +1639,62 @@ def _generate_website_pitch(
     profile: Any,
 ) -> str:
     """The `website_pitch` body: `copy.build_fallback_outreach` verbatim without AI, or an
-    LLM's expansion of `copy.build_prompt` with that same text as the guaranteed fallback.
+    LLM's expansion of `_website_pitch_prompt` with that same text as the guaranteed
+    fallback.
 
-    `build_fallback_outreach` -- not `build_fallback_summary` -- is the fallback, because it
-    is the one function in `copy.py` actually shaped as a message to the business
-    (`export/view.py` confirms this: `outreach_message` is what fills `website_pitch`).
-    `build_fallback_summary` is read but not called here; nothing in this schema has a place
-    to put a second, summary-shaped text yet.
+    Found live, once a real provider was actually reachable for the first time this
+    session: this used to call `copy.build_prompt` here, whose own instruction text reads
+    "Write a concise factual qualification summary" -- a DIFFERENT shape than
+    `build_fallback_outreach`'s "Hi {name}, I came across your listing...". While every
+    real provider was down, the router always fell back to the outreach-shaped text and
+    the mismatch was invisible; the moment Groq started actually answering, `website_pitch`
+    cells started filling with markdown-headed internal summaries ("**Qualification
+    Summary**", "- **Business:**...") instead of anything a human would read to a business
+    owner or send as a DM. `_website_pitch_prompt` asks for what this column actually is.
     """
     profiles = [profile] if profile else None
     fallback = build_fallback_outreach(lead, breakdown, profiles)
     if router is None:
         return fallback
-    prompt = build_prompt(lead, breakdown, profiles)
+    prompt = _website_pitch_prompt(lead, breakdown, profiles)
     return router.generate(prompt, fallback).text
 
 
-def _summary_prompt(lead: Lead, breakdown: Any, profiles: list[Any] | None) -> str:
-    """The LLM prompt for `ai_summary` -- deliberately its own text, not `copy.build_prompt`
-    reused verbatim.
+def _website_pitch_prompt(lead: Lead, breakdown: Any, profiles: list[Any] | None) -> str:
+    """The LLM prompt for `website_pitch` -- a message addressed TO the business, not an
+    internal note about it. See `_generate_website_pitch`'s docstring for the bug this
+    replaces: `copy.build_prompt` asks for a "qualification summary" instead."""
+    selected = profiles or profiles_for_lead(lead)
+    labels = ", ".join(profile.label for profile in selected) or lead.category
+    offer = selected[0].offer if selected else breakdown.pitch_angle
+    return f"""You are writing a short, warm outreach message TO a local business owner,
+on behalf of someone offering to help with their online presence -- not a note about them
+for internal use.
 
-    The LLM cache keys on the prompt string alone (see `llm/cache.py`), so calling
-    `router.generate` twice for the same lead with an IDENTICAL prompt -- once for
-    `website_pitch`, once here -- would return the exact same cached text for both fields
-    the second time, from a cache hit that has no idea two different columns are asking.
-    `build_prompt`'s own instruction text already asks for "a concise factual qualification
-    summary", which is what this column needs, but `_generate_website_pitch` already
-    fills a DIFFERENT column from that same prompt, so this cannot reuse it and stay
-    distinct. Written instead to ask explicitly for the internal, third-person briefing
-    `ai_summary` actually is -- not a message addressed to the business, which is what
-    `website_pitch`'s prompt (and `build_fallback_outreach`'s fallback shape) produces.
+Business: {lead.name}
+Matched niche: {labels}
+Resolved location: {lead.city}
+Phone found: {"yes" if lead.phone else "no"}
+Website/link: {lead.website or "none"}
+Observed signals: {", ".join(breakdown.signals)}
+Recommended offer: {offer}
+
+Write a concise message of three to four sentences, addressed directly to the business
+("Hi {lead.name}, ..."), offering to help with {offer}, and ending with a low-commitment
+question inviting a reply. Do not invent reviews, followers, revenue, demand, or any fact
+not shown above.
+"""
+
+
+def _summary_prompt(lead: Lead, breakdown: Any, profiles: list[Any] | None) -> str:
+    """The LLM prompt for `ai_summary` -- its own text, deliberately distinct from
+    `_website_pitch_prompt`'s.
+
+    The LLM cache keys on the prompt string alone (see `llm/cache.py`), so two columns
+    sharing one prompt would collide the moment both were generated for the same lead: the
+    second call's cache hit would silently hand back the first column's cached text. This
+    asks for the internal, third-person briefing `ai_summary` actually is -- not a message
+    addressed to the business, which is `website_pitch`'s job.
     """
     selected = profiles or profiles_for_lead(lead)
     labels = ", ".join(profile.label for profile in selected) or lead.category
