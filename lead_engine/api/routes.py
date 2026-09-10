@@ -39,6 +39,7 @@ from .schemas import (
     RunOut,
     SearchAcceptedOut,
     SearchPlanOut,
+    SheetsSyncOut,
     parse_enrich_request,
     parse_search_request,
     parse_verdict_update,
@@ -157,6 +158,24 @@ def enrich(engine: EngineDep, payload: Annotated[Any, Body()] = None) -> EnrichR
         offers_detected=report.offers_detected,
         outreach_written=report.outreach_written,
         usage=report.usage,
+    )
+
+
+@router.post("/api/sync-sheets", response_model=SheetsSyncOut, tags=["sheets"])
+def sync_sheets(engine: EngineDep) -> SheetsSyncOut:
+    """Sync the whole corpus with Google Sheets -- read Master, then write.
+
+    No `SearchSpec`, no city, no niche: unlike `/api/search` and `/api/enrich`, a sync is
+    not scoped to one run. Master is the whole living pipeline, and every business in it is
+    pushed, never just the ones a particular run found. Requires
+    `GOOGLE_SHEETS_CREDENTIALS_PATH` and `GOOGLE_SHEETS_SPREADSHEET_ID`; `Engine.sheets_client`
+    raises the 503 a caller with neither configured should see.
+    """
+    result = engine.sync_sheets()
+    return SheetsSyncOut(
+        verdicts_read=result.verdicts_read,
+        rows_updated=result.rows_updated,
+        rows_appended=result.rows_appended,
     )
 
 

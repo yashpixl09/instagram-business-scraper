@@ -82,6 +82,7 @@ from ..enrichment.service import (
     WebProvider,
 )
 from ..export import excel
+from ..export.sheets import GoogleSheetsClient, read_operator_verdicts, sync_master
 from ..geo.resolver import (
     CachingResolver,
     ChainResolver,
@@ -296,6 +297,15 @@ class EnrichmentReport:
 
 
 @dataclass(frozen=True)
+class SheetsSyncResult:
+    """What one Google Sheets sync did, in both directions -- see `Engine.sync_sheets`."""
+
+    verdicts_read: int
+    rows_updated: int
+    rows_appended: int
+
+
+@dataclass(frozen=True)
 class RunReport:
     """What one executed pass did. The CLI prints it; a worker will record it."""
 
@@ -429,6 +439,7 @@ class Engine:
         enrichment_provider: WebProvider | None = None,
         enrichment_fallback: WebProvider | None = None,
         llm_router: LLMRouter | None = None,
+        sheets_client: GoogleSheetsClient | None = None,
     ) -> None:
         self.settings = settings
         self.policy = policy
@@ -442,6 +453,7 @@ class Engine:
         self._enrichment_provider = enrichment_provider
         self._enrichment_fallback = enrichment_fallback
         self._llm_router = llm_router
+        self._sheets_client = sheets_client
         self.repository: Repository | None = Repository(pool) if pool is not None else None
 
     # -- lifecycle ---------------------------------------------------------------------
@@ -1204,6 +1216,82 @@ class Engine:
             offers_detected=offers_detected,
             outreach_written=outreach_written,
             usage=summary.usage.as_dict(),
+        )
+
+    # -- Google Sheets ----------------------------------------------------------------
+
+    def sheets_client(self) -> GoogleSheetsClient:
+        """An injected client (tests; a future caller with its own auth), or the real one
+        built from settings. Raises if either half of the configuration this needs -- a
+        credentials file, a spreadsheet id -- is missing, the same way
+        `require_maps_provider` raises rather than silently doing nothing."""
+        if self._sheets_client is not None:
+            return self._sheets_client
+        if not self.settings.sheets_configured:
+            raise ApiProblem(
+                503,
+                "sheets_not_configured",
+                "GOOGLE_SHEETS_CREDENTIALS_PATH and GOOGLE_SHEETS_SPREADSHEET_ID must both "
+                "be set. See env.example.",
+            )
+        self._sheets_client = GoogleSheetsClient.from_credentials_file(
+            self.settings.google_sheets_credentials_path,
+            self.settings.google_sheets_spreadsheet_id,
+        )
+        return self._sheets_client
+
+    def sync_sheets(self) -> SheetsSyncResult:
+        """The spec's own sync order: READ Master, THEN write, so an operator's edit on
+        the sheet always lands in `verdicts` before this pass's own agent columns
+        overwrite anything on the same row.
+
+        Every business in the corpus is pushed, not just ones from one run -- Master is
+        the whole living pipeline, not one run's slice of it, and `sync_master` already
+        never touches an operator's five columns regardless of how large this list is.
+        """
+        client = self.sheets_client()
+
+        rows = self._select(
+            "SELECT id, place_id FROM businesses WHERE place_id IS NOT NULL", {}
+        )
+        business_id_by_place_id = {row["place_id"]: row["id"] for row in rows}
+
+        verdicts_read = 0
+        for place_id, verdict in read_operator_verdicts(client).items():
+            business_id = business_id_by_place_id.get(place_id)
+            if business_id is None:
+                continue
+            if not (verdict.my_verdict or verdict.notes or verdict.outcome):
+                continue
+            self.set_verdict(
+                business_id,
+                VerdictUpdate(
+                    my_verdict=verdict.my_verdict,
+                    notes=verdict.notes or "",
+                    contacted_on=verdict.contacted_on,
+                    channel=verdict.channel,
+                    outcome=verdict.outcome,
+                ),
+            )
+            verdicts_read += 1
+
+        with self.require_pool().connection() as conn:
+            records = excel.fetch_records(conn)
+        name_to_place_id = {}
+        for row in self._select("SELECT name, place_id FROM businesses", {}):
+            if row["place_id"]:
+                name_to_place_id[row["name"]] = row["place_id"]
+        by_place_id = {
+            name_to_place_id[record.business_name]: record
+            for record in records
+            if record.business_name in name_to_place_id
+        }
+        result = sync_master(client, by_place_id)
+
+        return SheetsSyncResult(
+            verdicts_read=verdicts_read,
+            rows_updated=len(result.updated_place_ids),
+            rows_appended=len(result.appended_place_ids),
         )
 
 

@@ -601,3 +601,11 @@ class EnrichReportOut(BaseModel):
     offers_detected: int
     outreach_written: int
     usage: dict[str, Any]
+
+
+class SheetsSyncOut(BaseModel):
+    """What one Google Sheets sync did, in both directions -- see `Engine.sync_sheets`."""
+
+    verdicts_read: int
+    rows_updated: int
+    rows_appended: int

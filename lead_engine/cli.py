@@ -130,6 +130,18 @@ def build_parser() -> argparse.ArgumentParser:
             "credits a month -- usage is reported, not budgeted. Respects --no-ai."
         ),
     )
+    parser.add_argument(
+        "--sync-sheets",
+        action="store_true",
+        help=(
+            "After the run (and --enrich, if given), sync the whole corpus to Google "
+            "Sheets: read back any operator verdicts already on the Master tab, then "
+            "push fresh agent data for every business, never touching the operator's own "
+            "columns. Requires GOOGLE_SHEETS_CREDENTIALS_PATH and "
+            "GOOGLE_SHEETS_SPREADSHEET_ID (see env.example). To sync without also running "
+            "a discovery pass, use POST /api/sync-sheets instead."
+        ),
+    )
     return parser
 
 
@@ -181,6 +193,13 @@ def configuration_problem(args: argparse.Namespace, settings: Settings) -> ApiPr
             "database_not_configured",
             "LEAD_ENGINE_DSN is not set. A run records goals, cells, businesses and scores, "
             "and there is nowhere to put them.",
+        )
+    if args.sync_sheets and not settings.sheets_configured:
+        return ApiProblem(
+            503,
+            "sheets_not_configured",
+            "--sync-sheets needs GOOGLE_SHEETS_CREDENTIALS_PATH and "
+            "GOOGLE_SHEETS_SPREADSHEET_ID both set. See env.example.",
         )
     if not args.dry_run:
         # Up front, before a credit can move. The sheet is the product, and discovering
@@ -298,6 +317,15 @@ def print_enrichment_report(report: Any) -> None:
         )
 
 
+def print_sheets_sync_report(result: Any) -> None:
+    """The `--sync-sheets` summary block."""
+    _out()
+    _out("Google Sheets sync:")
+    _out(f"  operator verdicts read from the sheet : {result.verdicts_read}")
+    _out(f"  Master rows updated                   : {result.rows_updated}")
+    _out(f"  Master rows appended                  : {result.rows_appended}")
+
+
 # --- the run ------------------------------------------------------------------------------
 
 
@@ -370,6 +398,9 @@ def _run(args: argparse.Namespace, spec: SearchSpec, engine: Engine) -> int:
                 use_ai=not args.no_ai,
             )
             print_enrichment_report(enrichment_report)
+
+    if args.sync_sheets:
+        print_sheets_sync_report(engine.sync_sheets())
 
     return EXIT_OK
 
