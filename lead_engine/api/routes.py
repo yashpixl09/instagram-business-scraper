@@ -108,6 +108,21 @@ def plan_search(engine: EngineDep, payload: Annotated[Any, Body()] = None) -> Se
     return engine.plan(parse_search_request(payload))
 
 
+@router.post("/api/search/run", response_model=RunOut, tags=["search"])
+def run_search_now(engine: EngineDep, payload: Annotated[Any, Body()] = None) -> RunOut:
+    """Plan, check the budget, and actually perform the search -- synchronously.
+
+    Unlike `POST /api/search`, this really does spend a credit before returning. It exists
+    for a frontend's "run now" button, which needs a real result to show rather than a
+    receipt for a worker that (today) does not exist -- see
+    `Engine.execute_search_now`'s docstring for the tradeoff this accepts and how it is
+    mitigated.
+    """
+    spec = parse_search_request(payload)
+    report = engine.execute_search_now(spec)
+    return engine.run(report.run_id)
+
+
 @router.get("/api/runs", response_model=RunListOut, tags=["runs"])
 def list_runs(
     engine: EngineDep,

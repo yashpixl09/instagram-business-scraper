@@ -96,6 +96,7 @@ from ..llm.router import DatabaseCircuitStore, LLMRouter
 from ..models import Evidence, Lead
 from ..niches import NICHE_PROFILES, niche_payload
 from ..providers.budget import BudgetNotConfigured, SearchBudget, fingerprint
+from ..providers.errors import ProviderError
 from ..providers.fixtures import FixtureMapsProvider
 from ..providers.searchapi import SearchApiClient
 from ..providers.tinyfish import TinyFishClient
@@ -758,6 +759,37 @@ class Engine:
                 "searches."
             ),
         )
+
+    def execute_search_now(self, spec: SearchSpec, *, trigger: str = "api") -> RunReport:
+        """Plan, check the budget, then actually run the search -- synchronously.
+
+        This is the gap `start_search`'s own docstring names: nothing in the HTTP layer
+        called `execute_run` before this, because a request that spends a non-renewing
+        credit is one a browser refresh could spend twice. That risk is real and is
+        accepted here deliberately, for a frontend's "run now" button, rather than
+        building the worker infra `POST /api/search` was designed to hand off to (no
+        `discover` task handler exists yet -- see `workers/__init__.py`). The mitigation
+        is client-side (a disabled button while the request is in flight) and the same
+        plan-before-spend check `plan()` already gives an operator to look at first.
+        """
+        plan = self.plan(spec)
+        if plan.search_budget_remaining is not None and (
+            plan.planned_searches > plan.search_budget_remaining
+        ):
+            raise ApiProblem(
+                409,
+                "budget_exhausted",
+                f"This plan needs {plan.planned_searches} searches and "
+                f"{plan.search_budget_remaining} remain.",
+            )
+        goal_id, run_id = self.open_run(spec, trigger=trigger)
+        try:
+            return self.execute_run(
+                spec, goal_id=goal_id, run_id=run_id, max_searches=plan.planned_searches
+            )
+        except ProviderError as exc:
+            self.fail_run(run_id, exc.code)
+            raise
 
     # -- runs and leads ----------------------------------------------------------------
 
