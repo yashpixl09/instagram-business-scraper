@@ -183,6 +183,30 @@ class NamedBlockTests(unittest.TestCase):
 
 
 class NeverGuessTests(unittest.TestCase):
+    def test_a_role_word_inside_a_markdown_heading_records_no_name(self):
+        # Found live, on a real suspended-hosting placeholder page: "## For Website
+        # Owners" masks "Owners" via the role pattern and leaves "For Website" behind --
+        # title case, two words, not a stopword, and not a person. Headings are markup,
+        # not prose, and get skipped from extraction entirely rather than trying to
+        # enumerate every generic heading phrase as a stopword.
+        text = (
+            "# Service Suspended\n\n"
+            "The website owner or hosting provider has suspended this service.\n\n"
+            "## For Website Owners\n\n"
+            "If you are the owner of this website, please contact your hosting provider.\n"
+        )
+        self.assertEqual(find_contacts(text, source_url=None).candidates, ())
+
+    def test_a_heading_does_not_count_as_a_staff_cards_detail_line(self):
+        # A heading between a bare name and its real detail must not be treated as detail
+        # for that name (it would never match role/phone/email anyway) nor eat into the
+        # two-line detail budget that lets a search give up on a genuine non-match.
+        text = "Priya Sharma\n\n## Our Team\n\nFounder, priya@cakebee.in\n"
+        extraction = find_contacts(text, source_url=None)
+        self.assertEqual(len(extraction.candidates), 1)
+        self.assertEqual(extraction.candidates[0].name, "Priya Sharma")
+        self.assertEqual(extraction.candidates[0].email, "priya@cakebee.in")
+
     def test_a_name_with_nothing_nearby_records_nothing(self):
         # Two names in a row with no role, phone or email attached to either -- a staff
         # list, not a lead. Recording either would be a guess about who does what.

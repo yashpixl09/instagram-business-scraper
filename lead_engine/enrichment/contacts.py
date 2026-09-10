@@ -171,6 +171,16 @@ _TITLE = r"(?:Mr|Mrs|Ms|Dr|Mx)\.?\s+"
 _NAME_CORE = r"[A-Z][a-zA-Z'\-]+(?:\s+[A-Z][a-zA-Z'\-]+){1,2}"
 _NAME = re.compile(rf"(?:{_TITLE})?({_NAME_CORE})")
 
+#: `## For Website Owners`, `### Meet The Team` -- a markdown heading's own title-case
+#: words are structural markup, not prose, and this pipeline's fetched text is always
+#: markdown (`website.py`'s own docstring: TinyFish fixes `format=markdown`). Found live:
+#: a suspended-hosting placeholder page's heading "## For Website Owners" survived
+#: `_ROLE_WORDS_PATTERN` masking "Owners" out and left "For Website" behind, which matches
+#: the name shape and is not a stopword -- a fabricated "contact" named after a heading.
+#: Headings are skipped from extraction entirely, in both passes, rather than trying to
+#: enumerate every generic heading phrase as a stopword.
+_MARKDOWN_HEADING = re.compile(r"^#{1,6}\s")
+
 #: Common boilerplate that happens to be Capitalised at the start of a sentence or heading.
 #: A candidate containing any of these tokens is rejected outright -- borrowed in spirit
 #: from `website.py`'s `GENERIC_NAME_TOKENS`, for the same reason: these words identify a
@@ -361,7 +371,7 @@ def find_contacts(
     # Pass 1: everything needed is on one line.
     for index, raw_line in enumerate(lines):
         line = raw_line.strip()
-        if not line:
+        if not line or _MARKDOWN_HEADING.match(line):
             continue
         role = _extract_role(line)
         email = _extract_email(line)
@@ -379,7 +389,7 @@ def find_contacts(
         if index in consumed:
             continue
         line = raw_line.strip()
-        if not line:
+        if not line or _MARKDOWN_HEADING.match(line):
             continue
         name = _is_name_only_line(line)
         if not name:
@@ -393,7 +403,7 @@ def find_contacts(
         cursor = index + 1
         while cursor < count and seen_detail_lines < 2:
             candidate_line = lines[cursor].strip()
-            if not candidate_line:
+            if not candidate_line or _MARKDOWN_HEADING.match(candidate_line):
                 cursor += 1
                 continue
             seen_detail_lines += 1
