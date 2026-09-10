@@ -232,6 +232,25 @@ _STOPWORDS = frozenset(
         "floor",
         "cross",
         "main",
+        # Found live: a real multi-line address block ("Chinmaya Mission Hospital Rd" /
+        # "KFC Circle" / "Above Vivo Showroom" / "Bengaluru, Karnataka 560038") produced a
+        # "contact" named "Above Vivo Showroom" -- a bare, title-case, no-digit line
+        # sitting one line above the business's own phone number, exactly the staff-card
+        # shape pass 2 looks for. India's own address convention names a landmark relative
+        # to a well-known building rather than a street number, so these words recur across
+        # addresses the way "road"/"nagar" already do.
+        "showroom",
+        "circle",
+        "above",
+        "opposite",
+        "near",
+        "mall",
+        "complex",
+        "building",
+        "tower",
+        "plaza",
+        "junction",
+        "signal",
     }
 )
 

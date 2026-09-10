@@ -207,6 +207,23 @@ class NeverGuessTests(unittest.TestCase):
         self.assertEqual(extraction.candidates[0].name, "Priya Sharma")
         self.assertEqual(extraction.candidates[0].email, "priya@cakebee.in")
 
+    def test_a_multiline_address_block_records_no_name(self):
+        # Found live, on a real business's real site: a multi-line address --
+        # "Chinmaya Mission Hospital Rd" / "KFC Circle" / "Above Vivo Showroom" /
+        # "Bengaluru, Karnataka 560038" -- sitting one line above the business's own
+        # phone number produced a "contact" named "Above Vivo Showroom". Bare, title
+        # case, no digits: exactly the staff-card shape pass 2 looks for, and India's
+        # own address convention (a landmark relative to a well-known building) means
+        # this recurs across real addresses the way "road"/"nagar" already do.
+        text = (
+            "Chinmaya Mission Hospital Rd\n\n"
+            "KFC Circle\n\n"
+            "Above Vivo Showroom\n\n"
+            "Bengaluru, Karnataka 560038\n\n"
+            "+91 888 444 0838\n"
+        )
+        self.assertEqual(find_contacts(text, source_url=None).candidates, ())
+
     def test_a_name_with_nothing_nearby_records_nothing(self):
         # Two names in a row with no role, phone or email attached to either -- a staff
         # list, not a lead. Recording either would be a guess about who does what.
