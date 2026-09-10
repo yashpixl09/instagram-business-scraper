@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lead Engine</title>
+  <link rel="stylesheet" href="/app/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Lead Engine</h1>
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="run">New Run</button>
+      <button class="tab-btn" data-tab="leads">Leads</button>
+      <button class="tab-btn" data-tab="enrich">Enrich</button>
+      <button class="tab-btn" data-tab="sync">Sheets Sync</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Dashboard -->
+    <section id="tab-dashboard" class="tab-panel active">
+      <div class="cards" id="status-cards">
+        <div class="card"><div class="card-label">Database</div><div class="card-value" id="stat-db">-</div></div>
+        <div class="card"><div class="card-label">Search budget left</div><div class="card-value" id="stat-budget">-</div></div>
+        <div class="card"><div class="card-label">LLM configured</div><div class="card-value" id="stat-llm">-</div></div>
+        <div class="card"><div class="card-label">Sheets configured</div><div class="card-value" id="stat-sheets">-</div></div>
+      </div>
+      <h2>Providers</h2>
+      <div id="provider-list" class="chip-row"></div>
+      <h2>Recent runs</h2>
+      <table class="data-table" id="runs-table">
+        <thead><tr><th>Started</th><th>Status</th><th>New businesses</th><th>Searches spent</th><th>Scored</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- New Run -->
+    <section id="tab-run" class="tab-panel">
+      <form id="run-form" class="form-grid">
+        <label>City <input name="city" required placeholder="Bangalore" /></label>
+        <label>State <input name="state" placeholder="Karnataka" /></label>
+        <label>Country <input name="country" placeholder="India" /></label>
+        <label class="span-2">Areas (comma-separated, optional)
+          <input name="areas" placeholder="Indiranagar, Koramangala" />
+        </label>
+        <label class="span-2">Niches
+          <div id="niche-checkboxes" class="chip-row chip-row-select"></div>
+        </label>
+        <label>Limit <input name="limit" type="number" value="10" min="1" /></label>
+        <label class="checkbox-label"><input name="use_ai" type="checkbox" checked /> Use AI (summaries &amp; pitches)</label>
+        <label class="checkbox-label"><input name="enrich" type="checkbox" checked /> Enrich after discovery</label>
+        <label class="checkbox-label"><input name="sync_sheets" type="checkbox" /> Sync to Google Sheets after</label>
+      </form>
+      <div class="button-row">
+        <button id="btn-preview" type="button" class="btn-secondary">Preview cost</button>
+        <button id="btn-run" type="button" class="btn-primary">Run now</button>
+      </div>
+      <div id="run-result" class="result-box" hidden></div>
+    </section>
+
+    <!-- Leads -->
+    <section id="tab-leads" class="tab-panel">
+      <div class="button-row">
+        <label>Run <select id="leads-run-select"></select></label>
+        <button id="btn-refresh-leads" class="btn-secondary" type="button">Refresh</button>
+      </div>
+      <div class="leads-layout">
+        <table class="data-table" id="leads-table">
+          <thead><tr><th>Name</th><th>Niche</th><th>Score</th><th>Band</th><th>Verdict</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <aside id="lead-detail" class="lead-detail">
+          <p class="muted">Select a lead to see its detail.</p>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Enrich -->
+    <section id="tab-enrich" class="tab-panel">
+      <p>Enriches every lead in one run: website check, social handle, ad-library check, a
+         re-score, automation-opportunity detection for high/medium-verdict leads, and
+         drafted outreach.</p>
+      <label>Run to enrich <select id="enrich-run-select"></select></label>
+      <label class="checkbox-label"><input id="enrich-use-ai" type="checkbox" checked /> Use AI</label>
+      <div class="button-row"><button id="btn-enrich" class="btn-primary" type="button">Enrich this run</button></div>
+      <div id="enrich-result" class="result-box" hidden></div>
+    </section>
+
+    <!-- Sync -->
+    <section id="tab-sync" class="tab-panel">
+      <p>Reads any operator verdicts already on the Google Sheet's Master tab into this
+         database, then pushes the whole corpus's current data back &mdash; without ever
+         overwriting an operator's own columns.</p>
+      <div class="button-row"><button id="btn-sync" class="btn-primary" type="button">Sync now</button></div>
+      <div id="sync-result" class="result-box" hidden></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/app/app.js"></script>
+</body>
+</html>

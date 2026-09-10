@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..config import Settings
@@ -48,6 +50,12 @@ logger = logging.getLogger("lead_engine.api")
 
 TITLE = "lead-engine"
 VERSION = "0.1.0"
+
+#: The control panel: static HTML/JS/CSS calling this same API, no build step. Mounted
+#: rather than templated, because it is not server-rendered -- every value on the page
+#: comes from a `fetch()` to a route this file already defines, so a missing feature is a
+#: route to write, never markup to keep in sync with one.
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 #: What a 500 says. A constant, so no exception's text can become part of it.
 INTERNAL_ERROR_MESSAGE = (
@@ -174,4 +182,12 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
     app.add_exception_handler(Exception, handle_unexpected)
 
     app.include_router(router)
+
+    @app.get("/", include_in_schema=False)
+    def root() -> RedirectResponse:
+        return RedirectResponse(url="/app/")
+
+    if FRONTEND_DIR.is_dir():
+        app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
     return app
