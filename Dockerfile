@@ -29,7 +29,8 @@ COPY migrations ./migrations
 COPY env.example ./
 
 ENV PYTHONUNBUFFERED=1
+ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python -m lead_engine.db.migrate && uvicorn --factory lead_engine.api.app:create_app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["python", "-c", "import os, subprocess, sys; subprocess.run([sys.executable, '-m', 'lead_engine.db.migrate'], check=False); subprocess.run([sys.executable, '-m', 'uvicorn', '--factory', 'lead_engine.api.app:create_app', '--host', '0.0.0.0', '--port', os.environ.get('PORT', '8000')])"]
