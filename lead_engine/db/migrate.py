@@ -79,9 +79,16 @@ def main() -> int:
     if not dsn:
         print("LEAD_ENGINE_DSN or DATABASE_URL is not set (see env.example)", file=sys.stderr)
         return 2
-    with psycopg.connect(dsn) as conn:
-        apply_migrations(conn)
-    return 0
+    import time
+    for attempt in range(1, 11):
+        try:
+            with psycopg.connect(dsn, connect_timeout=5) as conn:
+                apply_migrations(conn)
+            return 0
+        except Exception as exc:
+            print(f"Migration attempt {attempt}/10 failed: {exc}. Retrying in 2s...", file=sys.stderr)
+            time.sleep(2)
+    return 1
 
 
 if __name__ == "__main__":
