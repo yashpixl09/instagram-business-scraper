@@ -22,17 +22,14 @@ WORKDIR /app
 # Copy dependencies from builder
 COPY --from=builder /install /usr/local
 
-# Copy application code, migrations, and entrypoint
+# Copy application code and migrations
 COPY pyproject.toml ./
 COPY lead_engine ./lead_engine
 COPY migrations ./migrations
 COPY env.example ./
-COPY entrypoint.sh ./
-
-RUN chmod +x /app/entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["sh", "-c", "python -m lead_engine.db.migrate && uvicorn --factory lead_engine.api.app:create_app --host 0.0.0.0 --port ${PORT:-8000}"]
