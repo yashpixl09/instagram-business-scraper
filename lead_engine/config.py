@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     )
 
     lead_engine_dsn: SecretStr | None = None
+    database_url: SecretStr | None = None
     searchapi_key: SecretStr | None = None
     lead_engine_search_budget: int = Field(default=DEFAULT_SEARCH_BUDGET, ge=0)
     tinyfish_api_key: SecretStr | None = None
@@ -105,7 +106,7 @@ class Settings(BaseSettings):
 
     @property
     def dsn(self) -> str | None:
-        return _value(self.lead_engine_dsn)
+        return _value(self.lead_engine_dsn) or _value(self.database_url)
 
     @property
     def searchapi_key_value(self) -> str | None:

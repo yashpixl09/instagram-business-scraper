@@ -75,9 +75,9 @@ def apply_migrations(conn: psycopg.Connection, directory: Path | None = None) ->
 
 
 def main() -> int:
-    dsn = os.environ.get("LEAD_ENGINE_DSN")
+    dsn = os.environ.get("LEAD_ENGINE_DSN") or os.environ.get("DATABASE_URL")
     if not dsn:
-        print("LEAD_ENGINE_DSN is not set (see env.example)", file=sys.stderr)
+        print("LEAD_ENGINE_DSN or DATABASE_URL is not set (see env.example)", file=sys.stderr)
         return 2
     with psycopg.connect(dsn) as conn:
         apply_migrations(conn)
