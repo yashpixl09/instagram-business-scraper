@@ -667,7 +667,11 @@ class Engine:
         """`niche_id -> verification state` for every niche the table knows about."""
         if self._pool is None:
             return {}
-        return {row["niche_id"]: row["state"] for row in self._select(SELECT_NICHE_STATES, {})}
+        try:
+            return {row["niche_id"]: row["state"] for row in self._select(SELECT_NICHE_STATES, {})}
+        except Exception as exc:
+            logger.warning("could not read niche_states from database: %s", exc)
+            return {}
 
     def niches(self) -> NicheListOut:
         """The registry, in registry order, each with how far its evidence has got.
