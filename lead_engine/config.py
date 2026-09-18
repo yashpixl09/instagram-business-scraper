@@ -101,8 +101,13 @@ class Settings(BaseSettings):
     # report whether it is SET without needing a dedicated unwrap.
     google_sheets_credentials_path: str | None = None
     google_sheets_spreadsheet_id: str | None = None
+    google_sheets_id: str | None = None
 
     # --- the values, each one named at the point of use ---------------------------------
+
+    @property
+    def sheets_id(self) -> str | None:
+        return self.google_sheets_spreadsheet_id or self.google_sheets_id
 
     @property
     def dsn(self) -> str | None:
@@ -130,9 +135,7 @@ class Settings(BaseSettings):
     def sheets_configured(self) -> bool:
         """Both a key and a target are required -- a credential with nowhere to write is
         exactly as unusable as a spreadsheet id with nothing to authenticate the write."""
-        return bool(self.google_sheets_credentials_path) and bool(
-            self.google_sheets_spreadsheet_id
-        )
+        return bool(self.google_sheets_credentials_path) and bool(self.sheets_id)
 
     def provider_status(self) -> dict[str, bool]:
         """Which providers hold a key. Booleans, in registry order, never a value."""
