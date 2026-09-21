@@ -1,103 +1,119 @@
-# Lead Engine
+# Lead Engine 🚀
 
-Durable agent runtime that finds local businesses without an effective web presence,
-qualifies them against real audience evidence, and produces an operator-ready pipeline.
+A durable agent runtime that finds local businesses without an effective web presence, qualifies them against real audience evidence, enriches social & Instagram data via human-paced browser sessions, and produces an operator-ready sales pipeline with AI-generated outreach copy.
 
-Quality over volume: a small number of high-confidence leads per run, each carrying enough
-verified evidence to walk in, call, or DM without further research. Volume accumulates
-across runs.
+---
 
-## Status
+## 🌟 Features
 
-Building. Phase 0 of 10 complete — the pure core and the niche registry.
+- **Google Maps Discovery**: Finds local businesses by city and niche using SearchAPI.
+- **Website Absence Verification**: Detects businesses operating without a site or with poor landing pages (via TinyFish & Firecrawl).
+- **Deterministic Lead Scoring**: 0–100 score + tier banding (High, Medium, Low) calculated in Python (no LLM hallucinations in scores).
+- **AI Sales Copy Generation**: Tailored outreach & automation pitches generated via LLM Router (Groq, Gemini, NVIDIA NIM).
+- **Instagram Browser Enrichment**: Human-paced, read-only Instagram profile signal extraction using Chrome MCP attached to your logged-in Chrome profile.
+- **Web Dashboard UI**: Clean, interactive Web Control Panel hosted directly on FastAPI (`/app/`).
+- **Google Sheets & Excel Export**: Bi-directional sync with Google Sheets & custom formatted Excel exports.
 
-Design: [`docs/superpowers/specs/2026-08-13-lead-engine-design.md`](docs/superpowers/specs/2026-08-13-lead-engine-design.md).
+---
 
-| Phase | | |
-|---|---|---|
-| 0 | Pure core, 24-niche registry | done |
-| 1 | Postgres, migrations, task queue, FastAPI | in progress |
-| 2 | SearchAPI discovery, geo resolution, search cells | |
-| 3 | Persistence, banding, Excel export | **first usable sheet** |
-| 4–10 | Enrichment, contacts, LLM router, Instagram, automation pitches, agent loop, Sheets | |
+## 📋 Prerequisites
 
-## Setup
+Before running Lead Engine, ensure you have installed:
+1. **Python 3.11 or higher** ([python.org](https://www.python.org/))
+2. **Docker Desktop** ([docker.com](https://www.docker.com/)) — *Required for local Postgres database*
+3. **Google Chrome Browser** — *Logged into your Instagram account (for Instagram profile enrichment)*
 
-Requires Python 3.11+ and Docker.
+---
 
+## 🛠️ Quick Start Guide
+
+### Step 1: Open Terminal in Project Folder
+
+Navigate to the unzipped project folder:
+```powershell
+cd instagram-business-scraper
+```
+
+### Step 2: Create & Activate Virtual Environment
+
+**Windows (PowerShell):**
 ```powershell
 python -m venv .venv
-.venv/Scripts/python.exe -m pip install -e ".[dev]"
-
-cp env.example .env          # then fill in keys
-docker compose up -d         # Postgres 17 + pgvector on host port 5433
-.venv/Scripts/python.exe -m lead_engine.db.migrate
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 ```
 
-The compose project is named `lead-engine` and binds host port **5433**, deliberately
-avoiding 5432 so it cannot collide with a local Postgres install or another project's
-container. Its volume is `lead_engine_pgdata`.
+**macOS / Linux:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
 
-## Tests
+### Step 3: Set Up Environment Variables
 
+Copy the template environment file to `.env`:
 ```powershell
-.venv/Scripts/python.exe -m pytest tests/ -q       # pure suite, no infrastructure
-.venv/Scripts/python.exe -m ruff check lead_engine tests
+cp env.example .env
 ```
 
-No test contacts a live external service. Providers sit behind an injectable transport
-driven by recorded fixtures, so the suite runs on a train.
+Open `.env` in a text editor and fill in your API keys (e.g. `SEARCHAPI_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `TINYFISH_API_KEY`).
 
-Integration tests need Postgres and skip themselves unless `LEAD_ENGINE_TEST_DSN` is set —
-the pure suite must never depend on infrastructure. Run them with:
+### Step 4: Start PostgreSQL Database
 
+Start the local PostgreSQL 17 + pgvector container:
 ```powershell
-.venv/Scripts/python.exe -m pytest tests/ -q -m integration
+docker compose up -d
+```
+*(Runs on host port `5433` to prevent collision with local Postgres installs).*
+
+### Step 5: Run Database Migrations
+
+Apply all SQL schema migrations:
+```powershell
+python -m lead_engine.db.migrate
 ```
 
-## Design notes
+### Step 6: Launch Web Server & Dashboard UI
 
-Three rules do most of the work, and each exists because of a specific failure:
+Start the Uvicorn web server:
+```powershell
+uvicorn --factory lead_engine.api.app:create_app --reload --port 8000
+```
 
-**Scoring is deterministic Python; the LLM only writes prose.** Every generated claim
-carries the `enrichment_id` it came from, so a sentence that cannot name a source row fails
-validation. A plausible invented review count reaching a sales conversation costs more than
-a crash.
+Open your browser and navigate to:
+👉 **[http://localhost:8000/app/](http://localhost:8000/app/)**
 
-**No two niches may claim the same Google type.** If type sets are disjoint, substitution
-cannot happen by type at all. This held for every type except `caterer`, which two niches
-claimed — and that single collision made every caterer look like a cloud kitchen.
+---
 
-**An exclusion is not free.** A disqualifying type is fatal, so two niches excluding each
-other's types leave a dual-labelled place matching *nothing* — and Google dual-labels
-precisely the businesses worth pitching. `{Massage spa, Ayurvedic clinic}` and
-`{Caterer, Banquet hall}` were both invisible until this was fixed.
+## 📷 Running Instagram Profile Enrichment
 
-## Approach
+Instagram profile signal extraction (`worker-browser`) runs on your local machine using Chrome attached to your logged-in Instagram browser session:
 
-| Stage | Source |
-|---|---|
-| Discover | SearchAPI Google Maps — website, phone, reviews, rating, `popular_times` |
-| Verify no website | SearchAPI `website` field + Firecrawl search |
-| Buying intent | Meta Ad Library public page |
-| Audience depth | Instagram, via the operator's own browser session |
-| Score | Deterministic Python; the LLM never produces a score |
-| Output | Excel and Google Sheets, with operator verdicts synced back |
+1. Open Google Chrome on your computer and make sure you are signed into **Instagram**.
+2. Run the local worker process:
+   ```powershell
+   python -m lead_engine.workers.runner
+   ```
+3. The worker connects to the task queue, safely navigates to Instagram profiles at human-paced rates (30s+ intervals), extracts profile signals (followers, bio, link), and records findings into Postgres.
 
-## Architecture
+---
 
-Three planes with separate lifetimes and failure modes:
+## ☁️ Cloud Deployment (Railway)
 
-- **Control** — `goals → runs → tasks → steps`, event-sourced and resumable
-- **Data** — typed, provenanced, append-only; every claim traces to a source row
-- **Memory** — scratchpad, run summaries, pgvector semantic recall
+Lead Engine is pre-configured with a multi-stage `Dockerfile`, `railway.json`, and automatic migration runners.
 
-Postgres is the single source of truth. `SKIP LOCKED` is the queue.
+To deploy to Railway:
+1. Connect your repository to Railway.
+2. Provision a **PostgreSQL** database.
+3. Link `DATABASE_URL` to your web service.
+4. Railway will automatically build the container, run database migrations, and host your live dashboard at `https://your-app.up.railway.app/app/`.
 
-## Boundaries
+---
 
-Instagram enrichment runs through Chrome MCP attached to the operator's existing
-authenticated browser profile. The system stores no credentials, automates no login, and
-creates no accounts. Access is read-only — no follows, likes, comments, or messages
-originate from the agent. Visits are serialized, human-paced, and capped per day; any
-block halts the worker rather than retrying into it.
+## 🧪 Running Tests
+
+To verify your installation and run the unit test suite (1100+ tests):
+```powershell
+pytest tests/ -q
+```
